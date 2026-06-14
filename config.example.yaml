@@ -1,0 +1,59 @@
+# Lascodia MT5 Supervisor — example config.
+#
+# Copy this file to ~/.lascodia/supervisor.yaml and edit.
+# Or pass a custom path via LASCODIA_SUPERVISOR_CONFIG=/path/to/file.yaml.
+
+# Globally-unique identifier for this daemon — used by the engine to
+# distinguish multiple supervisors (e.g. one per VPS).
+daemon_id: "macbook-pro-wine-dev"
+
+name: "Mac Wine (dev)"
+
+# Where the daemon's own HTTP server binds.
+bind_host: "127.0.0.1"
+bind_port: 7770
+
+# URL the engine will call back into for /terminals/launch etc.
+# For local dev this matches bind_host:bind_port.  For cross-host setups
+# (engine on container, daemon on Wine host) point this at the daemon's
+# reachable address.
+callback_base_url: "http://127.0.0.1:7770"
+
+# Engine API root.
+engine_url: "http://localhost:5081/api/v1/lascodia-trading-engine"
+
+# Long-lived JWT the operator generated for this daemon.  Same shape
+# the EAs use — get one by hitting POST /auth/token with the Admin
+# role.  Keep it secret.
+engine_token: "REPLACE_WITH_OPERATOR_PROVISIONED_JWT"
+
+# 32+ chars of randomness — engine uses this as X-Daemon-Auth on every
+# call back into the daemon.  Re-registration overwrites engine-side.
+# Generate with:  python -c "import secrets; print(secrets.token_urlsafe(32))"
+daemon_api_key: "REPLACE_WITH_32_RANDOM_CHARS"
+
+heartbeat_interval_sec: 30
+
+# Each install entry maps an operator-assigned slug to a launch command.
+# The supervisor doesn't manage broker credentials — those live inside
+# each MT5 install's saved-login state.  Per install: configure MT5
+# once manually with its broker login and "Save account info" enabled,
+# then point install.executable at terminal64.exe.
+installs:
+  # ── Example: macOS Wine install with the MetaQuotes demo account ──
+  - install_id: "demo-metaquotes"
+    name: "MetaQuotes Demo (Wine)"
+    executable: "/Users/you/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+    use_wine: true                     # macOS / Linux — prepend `wine`
+    extra_args: []                     # e.g. ["/portable"] to force a portable install
+    broker_name: "MetaQuotes-Demo"
+    account_login: "5049397557"
+
+  # ── Example: native Windows VPS install with a real broker account ──
+  # - install_id: "ic-markets-prod"
+  #   name: "IC Markets Production"
+  #   executable: "C:\\Program Files\\MetaTrader 5 IC Markets\\terminal64.exe"
+  #   use_wine: false
+  #   extra_args: ["/portable"]
+  #   broker_name: "ICMarketsSC-Live"
+  #   account_login: "12345678"
