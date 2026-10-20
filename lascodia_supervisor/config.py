@@ -56,6 +56,12 @@ class MT5Install(BaseModel):
     # terminal.
     wine_prefix: Optional[str] = None
 
+    # The terminal's MQL5 data directory, where the daemon drops an EA enrollment token
+    # (Files/Lascodia/enrollment_token.txt) before launching it.  Unset = the MQL5 folder next
+    # to terminal64.exe (portable installs and the macOS Wine layout).  Set it for a Windows
+    # install whose data lives under %APPDATA%\MetaQuotes\Terminal\<hash>\MQL5.
+    mql5_dir: Optional[str] = None
+
 
 class SupervisorConfig(BaseModel):
     daemon_id: str = Field(..., description="Globally-unique identifier for this daemon.")
@@ -81,6 +87,15 @@ class SupervisorConfig(BaseModel):
     # in config so a restart doesn't invalidate engine-side state — the engine
     # treats re-registration as authoritative anyway.
     daemon_api_key: str = Field(..., min_length=16, description="Shared secret for engine→daemon calls.")
+    # Multi-tenancy Phase 5 (EA ADR-0017): a single-use Daemon enrollment token ("Connect a
+    # supervisor" in the console, lsc_enr_…).  Used once, only while no machine credential is
+    # stored; the credential it is exchanged for signs the daemon in from then on (and lets it
+    # hand terminals it launches their own EA enrollment tokens).  Without it the daemon signs
+    # in with daemon_api_key for as long as the engine allows that.
+    enrollment_token: Optional[str] = Field(default=None, description="Single-use Daemon enrollment token (lsc_enr_…).")
+    # Where the machine credential is kept (mode 0600).  Default: machine_credential.json next
+    # to supervisor.yaml.
+    credential_path: Optional[str] = Field(default=None, description="Machine credential file (0600).")
     # Interval between heartbeats (seconds).  Engine treats a daemon as offline
     # when LastSeenAt is older than 3x this.
     heartbeat_interval_sec: int = Field(default=30, ge=5, le=300)
@@ -164,6 +179,8 @@ def load_config() -> SupervisorConfig:
     with path.open("r") as f:
         raw = yaml.safe_load(f) or {}
     cfg = SupervisorConfig(**raw)
+    if not cfg.credential_path:
+        cfg.credential_path = str(path.parent / "machine_credential.json")
 
     # Backfill broker_name / account_login from each install's
     # common.ini when the operator left them blank.  Runs on every

@@ -32,6 +32,18 @@ engine_token: "REPLACE_WITH_OPERATOR_PROVISIONED_JWT"
 # Generate with:  python -c "import secrets; print(secrets.token_urlsafe(32))"
 daemon_api_key: "REPLACE_WITH_32_RANDOM_CHARS"
 
+# ── Machine credentials (engine multi-tenancy Phase 5) ──────────────────
+# Single-use Daemon enrollment token from the console ("Connect a supervisor"),
+# lsc_enr_<8>_<40>, valid 24 h.  Used ONCE, only while no machine credential is
+# stored: the daemon exchanges it for its own credential (kept in credential_path,
+# mode 0600) and signs in with that from then on.  An enrolled daemon also hands
+# every terminal it launches an EA enrollment token bound to the install's
+# account, so the EA enrolls itself.  Leave empty to keep signing in with
+# daemon_api_key (only while the engine still allows daemon-key sign-in).
+enrollment_token: ""
+# Where the credential is kept.  Default: machine_credential.json next to this file.
+# credential_path: "/Users/you/.lascodia/machine_credential.json"
+
 heartbeat_interval_sec: 30
 
 # Each install entry maps an operator-assigned slug to a launch command.
@@ -46,8 +58,12 @@ installs:
     executable: "/Users/you/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/terminal64.exe"
     use_wine: true                     # macOS / Linux — prepend `wine`
     extra_args: []                     # e.g. ["/portable"] to force a portable install
-    broker_name: "MetaQuotes-Demo"
+    broker_name: "MetaQuotes-Demo"     # the broker SERVER the account signs in to
     account_login: "5049397557"
+    # Where the daemon drops the EA enrollment token before a launch
+    # (<mql5_dir>/Files/Lascodia/enrollment_token.txt).  Default: the MQL5
+    # folder next to terminal64.exe.
+    # mql5_dir: "/Users/you/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5"
 
   # ── Example: native Windows VPS install with a real broker account ──
   # - install_id: "ic-markets-prod"

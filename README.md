@@ -189,7 +189,9 @@ installs. Override with the `LASCODIA_SUPERVISOR_CONFIG` env var.
 | `callback_base_url` | no | `http://<bind_host>:<bind_port>` | URL the engine uses to call back into the daemon for launch/close. For cross-host setups, point at the daemon's externally-reachable address. |
 | `engine_url` | yes | — | Engine API root, e.g. `http://localhost:5081/api/v1/lascodia-trading-engine`. |
 | `engine_token` | no | `""` | Pre-provisioned JWT. Leave blank for auto-bootstrap (recommended). Only set when you want a longer-lived operator-minted token to override the auto-issued one. |
-| `daemon_api_key` | yes | — | 32+ random chars. Proof-of-identity for `/daemons/auth`. TOFU-pinned on the engine. |
+| `daemon_api_key` | yes | — | 32+ random chars. Proof-of-identity for `/daemons/auth` (legacy sign-in) and the `X-Daemon-Auth` secret the engine sends back. TOFU-pinned on the engine. |
+| `enrollment_token` | no | `""` | Single-use Daemon enrollment token (`lsc_enr_…`, 24 h) from the console. Exchanged once for the daemon's machine credential — see [Machine credentials](#machine-credentials-enrollment). |
+| `credential_path` | no | `machine_credential.json` next to `supervisor.yaml` | Where the machine credential is kept (mode 0600). |
 | `heartbeat_interval_sec` | no | `30` | Daemon→engine heartbeat cadence. Min 5, max 300. |
 | `installs` | no | `[]` | List of MT5 installs this daemon can launch. |
 
@@ -206,6 +208,7 @@ installs. Override with the `LASCODIA_SUPERVISOR_CONFIG` env var.
 | `wine_prefix` | no | derived | Wine prefix root. Auto-derived at register time by walking up from `executable` to the parent of `drive_c`. **Critical for multi-broker isolation** — see [Multi-broker isolation](#multi-broker-isolation-macos). |
 | `broker_name` | no | autofill | Empty values are backfilled from `<executable dir>/config/common.ini`'s `Server=` field at daemon startup. |
 | `account_login` | no | autofill | Empty values are backfilled from `Login=` in the same file. |
+| `mql5_dir` | no | `<executable dir>/MQL5` | The terminal's MQL5 data folder, where an enrolled daemon drops the EA enrollment token before a launch. Set it for a Windows install whose data lives under `%APPDATA%`. |
 
 ### Autofill cascade
 
@@ -707,6 +710,36 @@ known and works from anywhere.
 
 The endpoint is rate-limited per client address.
 
+### Machine credentials (enrollment)
+
+Engine multi-tenancy Phase 5 (EA ADR-0017) replaces the daemon key as the daemon's proof of
+identity. The sign-in ladder (`EngineClient._authenticate`):
+
+1. **Stored machine credential** (`credential_path`, mode 0600) → `POST /machine/token` → a
+   15-minute access token, renewed the same way 5 minutes before it expires. 401 = the engine
+   no longer accepts it (revoked): the file is deleted and the ladder continues; 403 = refused
+   for now (organisation closed): kept; 404 / 5xx = the engine cannot do machine credentials
+   now: kept, and only the daemon key is tried.
+2. **`enrollment_token`** → `POST /machine/enroll` (kind `Daemon`, instance id = `daemon_id`) →
+   the credential is stored (0600) and used at once. A refused token (used, expired, revoked, a
+   `daemon_id` of another organisation) is not sent again; ask for a new one.
+3. **`daemon_api_key`** → `POST /admin/terminals/daemons/auth`, while the engine allows it. HTTP
+   410 means the engine retired daemon-key sign-in: set `enrollment_token` and restart.
+
+An enrolled daemon belongs to the organisation of its token; the engine stamps its daemon row
+and sessions with it. Before it launches a terminal (`POST /terminals/launch`) whose install has
+`account_login` + `broker_name` and whose `MQL5/Files/Lascodia` holds no `machine_<login>_*.txt`
+credential yet, it asks the engine for an EA-terminal enrollment token bound to that account
+(`POST /machine/daemon/enrollments`) and writes it to
+`<mql5_dir>/Files/Lascodia/enrollment_token.txt` (0600). The EA (v8.47.253+) uses it once and
+deletes it. Failing to prepare a token never blocks the launch. A legacy (daemon-key) session
+cannot request terminal tokens — the engine refuses it.
+
+Setting up: create a Daemon enrollment token in the console (people with `accounts.manage`, in the
+organisation the host belongs to), put it in `enrollment_token`, restart the daemon
+(`launchctl kickstart -k gui/$(id -u)/com.lascodia.supervisor`), check the log for
+`daemon <id> enrolled`, then clear `enrollment_token` (it is spent).
+
 ### Who may write a daemon row
 
 `POST /admin/terminals/daemons` (register) and `/daemons/heartbeat`
@@ -739,7 +772,9 @@ its first start after the upgrade. Nothing changes on the daemon side.
 - On 401 from any request, the client clears the cache and re-auths
   once. Two consecutive 401s bubble up as a register/heartbeat failure
   and the next tick retries the whole sequence.
-- Tokens are kept in process memory only — never persisted to disk.
+- Tokens are kept in process memory only — never persisted to disk (the machine
+  credential they come from is, with mode 0600).
+- Machine tokens (enrolled daemons) live 15 minutes and renew through `/machine/token`.
 
 ### API-key rotation
 

@@ -17,6 +17,7 @@ import uvicorn
 from .admin_api import AdminApiState, build_router as build_admin_router
 from .config import SupervisorConfig, default_config_path, load_config
 from .engine_client import EngineClient
+from .machine_credentials import prepare_terminal_enrollment
 from .process_manager import ProcessManager, TerminalSession
 
 logger = logging.getLogger("lascodia.supervisor")
@@ -207,6 +208,12 @@ def launch_terminal(req: LaunchRequest, _: None = Depends(require_daemon_auth)) 
     install = next((i for i in STATE.cfg.installs if i.install_id == req.installId), None)
     if install is None:
         raise HTTPException(status_code=404, detail=f"unknown installId '{req.installId}'")
+    # Multi-tenancy Phase 5: a terminal whose EAs hold no machine credential yet gets an
+    # EA enrollment token bound to its account, so its EA enrolls itself.  Never blocks a launch.
+    try:
+        prepare_terminal_enrollment(STATE.engine, STATE.cfg.daemon_id, install)
+    except Exception:
+        logger.exception("install %s: preparing its enrollment token failed; launching anyway", install.install_id)
     try:
         sess = STATE.pm.launch(install, reason=req.reason)
     except RuntimeError as ex:
