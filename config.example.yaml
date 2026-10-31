@@ -46,6 +46,21 @@ enrollment_token: ""
 
 heartbeat_interval_sec: 30
 
+# ── Self-heal (2026-10-31) ───────────────────────────────────────────────
+# Local watchdog: keeps managed terminals running under the engine's desired state
+# (heartbeat response).  Limits mirror the engine's EA:AutoHeal limits.
+watchdog:
+  enabled: true
+  start_backoff_sec: [30, 120, 300, 900]
+  max_restarts_per_hour: 3
+  max_restarts_per_day: 8
+  launch_grace_sec: 300      # no wedge decision this soon after a launch
+  wake_grace_sec: 300        # ... or after the Mac wakes from sleep
+# Pull job channel (engine queues Start/Stop/Restart/DeployEaBinary/TailLog/PruneFiles).
+jobs_enabled: true
+# state_dir: <config dir>/state        (sessions, watchdog history, desired state)
+# log_dir:   <install root>/logs       (rotating supervisor.log, 20 MB x 5)
+
 # Each install entry maps an operator-assigned slug to a launch command.
 # The supervisor doesn't manage broker credentials — those live inside
 # each MT5 install's saved-login state.  Per install: configure MT5
@@ -64,6 +79,13 @@ installs:
     # (<mql5_dir>/Files/Lascodia/enrollment_token.txt).  Default: the MQL5
     # folder next to terminal64.exe.
     # mql5_dir: "/Users/you/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5"
+    # How to start it: app = `open -a <app_path>` (the macOS wrapper; default when found),
+    # wine = spawn wine64 terminal64.exe.
+    launch_mode: app
+    # app_path: "/Applications/MetaTrader 5.app"   # default: found by CFBundleIdentifier
+    # Keep it running even before the engine has sent a desired state.
+    managed: true
+    wedge_after_sec: 300
 
   # ── Example: native Windows VPS install with a real broker account ──
   # - install_id: "ic-markets-prod"

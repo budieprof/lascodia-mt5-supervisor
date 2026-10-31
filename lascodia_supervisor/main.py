@@ -17,14 +17,12 @@ import uvicorn
 from .admin_api import AdminApiState, build_router as build_admin_router
 from .config import SupervisorConfig, default_config_path, load_config
 from .engine_client import EngineClient
+from .logsetup import setup_logging, supervisor_log_path
 from .machine_credentials import prepare_terminal_enrollment
-from .process_manager import ProcessManager, TerminalSession
+from .process_manager import ProcessManager
+from .runtime import FAILED, Supervisor
 
 logger = logging.getLogger("lascodia.supervisor")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
-)
 
 
 class LaunchRequest(BaseModel):
@@ -43,7 +41,9 @@ class _State:
     cfg: SupervisorConfig
     pm: ProcessManager
     engine: EngineClient
+    sup: Supervisor
     heartbeat_task: Optional[asyncio.Task] = None
+    jobs_task: Optional[asyncio.Task] = None
 
     def reload_config(self) -> None:
         """Re-read supervisor.yaml and rebuild the EngineClient so its
@@ -64,6 +64,9 @@ class _State:
         except Exception:
             pass
         self.engine = EngineClient(new_cfg)
+        if getattr(self, "sup", None) is not None:
+            self.sup.engine = self.engine
+            self.sup.jobs.engine = self.engine
 
 
 STATE = _State()
@@ -102,23 +105,84 @@ async def _heartbeat_loop() -> None:
     /admin/installs/*) within one heartbeat interval — without this,
     the admin UI's Terminals page renders stale install rows until the
     daemon re-registers."""
-    interval = STATE.cfg.heartbeat_interval_sec
     while True:
         try:
-            STATE.pm.refresh()
+            # Discover + adopt, read beacons / journal, run the watchdog (actions run on the
+            # supervisor's own threads), then report the C4 runtime and take the engine's
+            # desired state back.  Blocking work stays off the event loop.
+            await asyncio.to_thread(STATE.sup.tick)
             sessions_payload = [s.to_payload() for s in STATE.pm.list_sessions()]
-            installs_payload = _installs_payload(STATE.cfg)
-            STATE.engine.heartbeat(sessions_payload, installs_payload)
+            installs_payload = STATE.sup.installs_payload(_installs_payload(STATE.cfg))
+            ok, body = await asyncio.to_thread(STATE.engine.heartbeat_ex, sessions_payload, installs_payload)
+            if ok:
+                STATE.sup.apply_heartbeat_response(body)
         except Exception:
             logger.exception("heartbeat loop iteration failed; will retry next tick")
-        await asyncio.sleep(interval)
+        await asyncio.sleep(STATE.cfg.heartbeat_interval_sec)
+
+
+async def _jobs_loop() -> None:
+    """Pull job channel (C4): long-poll the engine, run each job on a worker thread, report the
+    result.  Results that could not be delivered are retried before the next poll."""
+    pending: list[tuple] = []
+    backoff = 5
+    running: set[asyncio.Task] = set()
+
+    async def run_one(job: dict) -> None:
+        jid = job.get("jobId")
+        logger.info("job %s: %s install=%s", jid, job.get("type"), job.get("installId"))
+        try:
+            status, message, data = await asyncio.to_thread(STATE.sup.run_job, job)
+        except Exception as ex:  # pragma: no cover - run_job already catches
+            status, message, data = FAILED, f"supervisor error: {ex}", {}
+        logger.info("job %s: %s — %s", jid, status, message)
+        if not await asyncio.to_thread(STATE.engine.post_job_result, jid, status, message, data):
+            pending.append((jid, status, message, data, 0))
+
+    while True:
+        if not STATE.cfg.jobs_enabled:
+            await asyncio.sleep(30)
+            continue
+        try:
+            for item in list(pending):
+                jid, status, message, data, tries = item
+                pending.remove(item)
+                if not await asyncio.to_thread(STATE.engine.post_job_result, jid, status, message, data) \
+                        and tries < 20:
+                    pending.append((jid, status, message, data, tries + 1))
+            jobs = await asyncio.to_thread(STATE.engine.poll_jobs, STATE.cfg.jobs_wait_sec)
+            if jobs is None:
+                # Engine unreachable, or an engine without the job channel yet (404): back off.
+                await asyncio.sleep(60 if STATE.engine.jobs_unsupported else backoff)
+                backoff = min(60, backoff * 2)
+                continue
+            backoff = 5
+            for job in jobs:
+                t = asyncio.create_task(run_one(job))
+                running.add(t)
+                t.add_done_callback(running.discard)
+            if not jobs:
+                await asyncio.sleep(1)  # the engine already waited waitSec; do not spin if it did not
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("job loop iteration failed")
+            await asyncio.sleep(backoff)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     STATE.cfg = load_config()
-    STATE.pm = ProcessManager()
+    setup_logging(STATE.cfg)
     STATE.engine = EngineClient(STATE.cfg)
+
+    def _before_launch(install) -> None:
+        # Multi-tenancy Phase 5: hand a terminal without a machine credential an EA enrollment token.
+        prepare_terminal_enrollment(STATE.engine, STATE.cfg.daemon_id, install)
+
+    STATE.sup = Supervisor(lambda: STATE.cfg, engine=STATE.engine, before_launch=_before_launch,
+                           supervisor_log=lambda: supervisor_log_path(STATE.cfg))
+    STATE.pm = STATE.sup.pm
 
     # Register with the engine.  Failure here is non-fatal — operator can fix
     # config + restart, and the heartbeat loop will retry on every tick.
@@ -129,21 +193,24 @@ async def lifespan(app: FastAPI):
         logger.warning("initial register failed; will retry via heartbeat loop")
 
     STATE.heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    STATE.jobs_task = asyncio.create_task(_jobs_loop())
     try:
         yield
     finally:
-        if STATE.heartbeat_task is not None:
-            STATE.heartbeat_task.cancel()
-            try:
-                await STATE.heartbeat_task
-            except asyncio.CancelledError:
-                pass
+        for task in (STATE.heartbeat_task, STATE.jobs_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        STATE.sup.shutdown()
         STATE.engine.close()
 
 
 app = FastAPI(
     title="Lascodia MT5 Supervisor",
-    version="0.1.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -208,14 +275,10 @@ def launch_terminal(req: LaunchRequest, _: None = Depends(require_daemon_auth)) 
     install = next((i for i in STATE.cfg.installs if i.install_id == req.installId), None)
     if install is None:
         raise HTTPException(status_code=404, detail=f"unknown installId '{req.installId}'")
-    # Multi-tenancy Phase 5: a terminal whose EAs hold no machine credential yet gets an
-    # EA enrollment token bound to its account, so its EA enrolls itself.  Never blocks a launch.
-    try:
-        prepare_terminal_enrollment(STATE.engine, STATE.cfg.daemon_id, install)
-    except Exception:
-        logger.exception("install %s: preparing its enrollment token failed; launching anyway", install.install_id)
+    # The controller's pre-launch hook drops an EA enrollment token when the terminal needs one.
     try:
         sess = STATE.pm.launch(install, reason=req.reason)
+        STATE.sup.watchdog.note_operator_launch(install.install_id)
     except RuntimeError as ex:
         raise HTTPException(status_code=500, detail=str(ex)) from ex
     return LaunchResponse(sessionId=sess.session_id, pid=sess.pid, status=sess.status)
@@ -233,11 +296,15 @@ def close_terminal(session_id: str, _: None = Depends(require_daemon_auth)) -> d
 def run() -> None:
     """Console-script entry point installed by setuptools."""
     cfg = load_config()
+    setup_logging(cfg)
     uvicorn.run(
         "lascodia_supervisor.main:app",
         host=cfg.bind_host,
         port=cfg.bind_port,
         log_level="info",
+        # Leave logging to setup_logging: uvicorn's loggers propagate into the rotating
+        # supervisor.log instead of growing launchd's stderr.log forever.
+        log_config=None,
     )
 
 

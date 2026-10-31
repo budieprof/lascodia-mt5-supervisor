@@ -22,6 +22,7 @@ organisation (``request_terminal_enrollment_token``), which it drops into a term
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -68,6 +69,10 @@ class EngineClient:
         self._machine_session = False
         self._legacy_retired = False
         self._enrollment_spent = False
+        self.jobs_unsupported = False
+        # The heartbeat and the job-poll loop run on different threads with this one client:
+        # sign-in (and the single-use enrollment exchange) must happen once, not twice in parallel.
+        self._auth_lock = threading.RLock()
 
         credential_path = Path(cfg.credential_path) if cfg.credential_path \
             else default_config_path().parent / "machine_credential.json"
@@ -112,6 +117,10 @@ class EngineClient:
 
     def _authenticate(self) -> bool:
         """Run the sign-in ladder. Returns True with self._token set."""
+        with self._auth_lock:
+            return self._authenticate_locked()
+
+    def _authenticate_locked(self) -> bool:
         legacy_only = False
 
         credential = self._credentials.load()
@@ -264,7 +273,10 @@ class EngineClient:
         """Sign in lazily before any request that needs a token.  Cheap when the token is fresh."""
         if not self._token_is_stale():
             return True
-        return self._authenticate()
+        with self._auth_lock:
+            if not self._token_is_stale():   # another thread just signed in
+                return True
+            return self._authenticate()
 
     # ── helpers ──────────────────────────────────────────────────────
     def _request_with_auth(self, method: str, url: str, **kwargs) -> Optional[httpx.Response]:
@@ -322,6 +334,13 @@ class EngineClient:
 
     def heartbeat(self, sessions_payload: list[dict],
                   installs_payload: Optional[list[dict]] = None) -> bool:
+        ok, _ = self.heartbeat_ex(sessions_payload, installs_payload)
+        return ok
+
+    def heartbeat_ex(self, sessions_payload: list[dict],
+                     installs_payload: Optional[list[dict]] = None) -> tuple[bool, dict]:
+        """Heartbeat, returning (ok, response body).  The body carries the engine's per-install
+        desired state (contract C4) — see desired.extract_desired."""
         body = {
             "daemonId": self._cfg.daemon_id,
             "sessions": sessions_payload,
@@ -336,13 +355,79 @@ class EngineClient:
             body["installs"] = installs_payload
         resp = self._request_with_auth("POST", "admin/terminals/daemons/heartbeat", json=body)
         if resp is None:
-            return False
+            return False, {}
         try:
             resp.raise_for_status()
-            return True
         except httpx.HTTPError as ex:
             logger.warning("heartbeat failed: %s", ex)
+            return False, {}
+        return True, _json(resp)
+
+    # ── job channel (contract C4) ────────────────────────────────────
+    def poll_jobs(self, wait_sec: int = 20) -> Optional[list[dict]]:
+        """Long-poll ``GET admin/terminals/daemons/jobs?waitSec=N``.  Returns the job list ([] when
+        none), or None when the engine could not be asked (the caller backs off).  An engine
+        without the job channel (404) also returns None."""
+        resp = self._request_with_auth(
+            "GET", "admin/terminals/daemons/jobs",
+            params={"waitSec": wait_sec, "daemonId": self._cfg.daemon_id},
+            timeout=wait_sec + 15)
+        if resp is None:
+            return None
+        if resp.status_code == 404:
+            self.jobs_unsupported = True
+            return None
+        if resp.status_code != 200:
+            logger.warning("job poll: HTTP %d", resp.status_code)
+            return None
+        self.jobs_unsupported = False
+        try:
+            payload = resp.json()
+        except ValueError:
+            return None
+        if isinstance(payload, dict):
+            payload = payload.get("data")
+            if isinstance(payload, dict):
+                payload = payload.get("jobs") or payload.get("items")
+        if not isinstance(payload, list):
+            return []
+        return [j for j in payload if isinstance(j, dict) and j.get("jobId") is not None]
+
+    def post_job_result(self, job_id, status: str, message: str, data: dict) -> bool:
+        resp = self._request_with_auth(
+            "POST", f"admin/terminals/daemons/jobs/{job_id}/result",
+            json={"status": status, "message": message[:2000], "data": data or {}})
+        if resp is None:
             return False
+        if resp.status_code in (404, 409, 410):
+            # Unknown / expired / already reported: retrying cannot help.
+            logger.warning("job %s result not accepted (HTTP %d) — dropping it", job_id, resp.status_code)
+            return True
+        return 200 <= resp.status_code < 300
+
+    def download_release(self, release_id) -> tuple[Optional[bytes], str]:
+        """``GET platform/ea/releases/{id}/binary`` with the daemon token → (bytes, "") or (None, why).
+        Accepts a raw octet stream or a JSON envelope carrying the binary as base64."""
+        resp = self._request_with_auth("GET", f"platform/ea/releases/{release_id}/binary", timeout=120)
+        if resp is None:
+            return None, "engine unreachable"
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}"
+        ctype = resp.headers.get("content-type", "")
+        if "json" in ctype:
+            import base64
+            data = _json(resp).get("data")
+            if isinstance(data, dict):
+                data = data.get("contentBase64") or data.get("binaryBase64") or data.get("content")
+            if isinstance(data, str):
+                try:
+                    return base64.b64decode(data, validate=True), ""
+                except ValueError:
+                    return None, "release binary was not valid base64"
+            return None, "release response held no binary"
+        if not resp.content:
+            return None, "empty binary"
+        return resp.content, ""
 
     def request_terminal_enrollment_token(self, account_login: str, broker_server: str,
                                           label: str) -> Optional[dict]:

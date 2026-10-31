@@ -228,6 +228,86 @@ EOF
   say "Done"
 }
 
+# ── detect_installs ─────────────────────────────────────────────────────
+# Emit a YAML `installs:` block for every MT5 on this Mac, all `managed: true` (the supervisor
+# keeps them running / restarts them when wedged, under the engine's desired state):
+#   * each /Applications/MetaTrader 5*.app wrapper whose prefix
+#     ~/Library/Application Support/<CFBundleIdentifier> holds a terminal64.exe
+#     → launch_mode: app (how the live terminals run; builds >= 6290 need the wrapper);
+#   * each remaining ~/Library/Application Support/net.metaquotes.wine.* prefix with a
+#     terminal64.exe but no wrapper app → launch_mode: wine, managed: false (no wrapper =
+#     cannot be started the way MT5 expects; the operator decides).
+# The prefix net.metaquotes.wine.metatrader5 keeps the "wine-mt5-default" id the admin API
+# protects; others are named after the bundle id suffix ("exness").
+detect_installs() {
+  local seen=" " app bid prefix exe slug login server lower
+  local out="installs:"
+  local found=0
+  shopt -s nullglob
+  for app in /Applications/MetaTrader\ 5*.app; do
+    bid="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${app}/Contents/Info.plist" 2>/dev/null || true)"
+    [[ -z "${bid}" ]] && continue
+    lower="$(printf '%s' "${bid}" | tr 'A-Z' 'a-z')"
+    prefix="${HOME}/Library/Application Support/${lower}"
+    [[ -d "${prefix}" ]] || prefix="${HOME}/Library/Application Support/${bid}"
+    exe="${prefix}/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+    [[ -f "${exe}" ]] || continue
+    slug="${lower#net.metaquotes.wine.}"
+    [[ "${slug}" == "metatrader5" ]] && slug="wine-mt5-default"
+    slug="$(printf '%s' "${slug}" | tr -c 'a-z0-9-' '-' | sed -e 's/-\{2,\}/-/g' -e 's/^-//' -e 's/-$//')"
+    LOGIN=""; SERVER=""
+    eval "$(parse_mt5_account "${exe}")"
+    out+=$'\n'"  - install_id: \"${slug}\""
+    out+=$'\n'"    name: \"$(basename "${app}" .app)${SERVER:+ (${SERVER})}\""
+    out+=$'\n'"    executable: \"${exe}\""
+    out+=$'\n'"    use_wine: true"
+    out+=$'\n'"    extra_args: []"
+    out+=$'\n'"    broker_name: \"${SERVER}\""
+    out+=$'\n'"    account_login: \"${LOGIN}\""
+    out+=$'\n'"    wine_prefix: \"${prefix}\""
+    out+=$'\n'"    launch_mode: app"
+    out+=$'\n'"    app_path: \"${app}\""
+    out+=$'\n'"    managed: true"
+    seen+="$(printf '%s' "${prefix}" | tr 'A-Z' 'a-z') "
+    found=$((found + 1))
+  done
+  for prefix in "${HOME}"/Library/Application\ Support/net.metaquotes.wine.*; do
+    [[ -d "${prefix}" ]] || continue
+    lower="$(printf '%s' "${prefix}" | tr 'A-Z' 'a-z')"
+    [[ "${seen}" == *" ${lower} "* ]] && continue
+    exe="${prefix}/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+    [[ -f "${exe}" ]] || continue
+    slug="$(basename "${prefix}" | tr 'A-Z' 'a-z')"
+    slug="${slug#net.metaquotes.wine.}"
+    slug="$(printf '%s' "${slug}" | tr -c 'a-z0-9-' '-' | sed -e 's/-\{2,\}/-/g' -e 's/^-//' -e 's/-$//')"
+    LOGIN=""; SERVER=""
+    eval "$(parse_mt5_account "${exe}")"
+    out+=$'\n'"  - install_id: \"${slug}\""
+    out+=$'\n'"    name: \"MT5 ${slug}${SERVER:+ (${SERVER})}\""
+    out+=$'\n'"    executable: \"${exe}\""
+    out+=$'\n'"    use_wine: true"
+    out+=$'\n'"    extra_args: []"
+    out+=$'\n'"    broker_name: \"${SERVER}\""
+    out+=$'\n'"    account_login: \"${LOGIN}\""
+    out+=$'\n'"    wine_prefix: \"${prefix}\""
+    out+=$'\n'"    launch_mode: wine"
+    out+=$'\n'"    managed: false"
+    found=$((found + 1))
+  done
+  shopt -u nullglob
+  if (( found == 0 )); then
+    echo "installs: []"
+  else
+    printf '%s\n' "${out}"
+  fi
+}
+
+# --print-detected-installs: show what detect_installs would write, change nothing.
+if [[ "${1:-}" == "--print-detected-installs" ]]; then
+  detect_installs
+  exit 0
+fi
+
 # ── Pre-flight: macOS, modern launchd, sufficient Python ────────────────
 require_macos() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -313,6 +393,13 @@ ADD_INSTALL_EXEC=""
 ADD_INSTALL_ID=""
 ADD_INSTALL_NAME=""
 CLONE_MT5_BROKER=""
+ARG_DAEMON_ID=""
+ARG_DAEMON_NAME=""
+ARG_ENGINE_URL=""
+ARG_ENROLLMENT_TOKEN=""
+ARG_BIND_HOST=""
+ARG_BIND_PORT=""
+AUTO_INSTALLS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uninstall)        do_uninstall ;;
@@ -324,6 +411,13 @@ while [[ $# -gt 0 ]]; do
     --install-id)       shift; ADD_INSTALL_ID="${1:-}" ;;
     --install-name)     shift; ADD_INSTALL_NAME="${1:-}" ;;
     --clone-mt5)        shift; CLONE_MT5_BROKER="${1:-}" ;;
+    --daemon-id)        shift; ARG_DAEMON_ID="${1:-}" ;;
+    --daemon-name)      shift; ARG_DAEMON_NAME="${1:-}" ;;
+    --engine-url)       shift; ARG_ENGINE_URL="${1:-}" ;;
+    --enrollment-token) shift; ARG_ENROLLMENT_TOKEN="${1:-}" ;;
+    --bind-host)        shift; ARG_BIND_HOST="${1:-}" ;;
+    --bind-port)        shift; ARG_BIND_PORT="${1:-}" ;;
+    --no-auto-installs) AUTO_INSTALLS=0 ;;
     -h|--help)
       cat <<EOF
 Usage: ./install.sh [OPTIONS]
@@ -353,6 +447,19 @@ Usage: ./install.sh [OPTIONS]
                      clone, you launch the new app manually once to initialise
                      the Wine prefix and log into the broker, then point
                      --add-install at the new terminal64.exe.
+  --daemon-id ID      Daemon id (unique across the fleet).  Default: <hostname>-mac.
+  --daemon-name N     Human-readable daemon name.
+  --engine-url URL    Engine API root, e.g. http://192.168.1.10:5081/api/v1/lascodia-trading-engine
+  --enrollment-token T  Single-use Daemon enrollment token (lsc_enr_..., console "Connect a
+                     supervisor").  Exchanged once for this daemon's machine credential.
+  --bind-host H      Where the supervisor's own HTTP API listens.  Default 127.0.0.1.  The
+                     engine reaches hosts through the pull job channel, so a LAN bind is only
+                     needed for the legacy engine->daemon push calls (/terminals/launch).
+  --bind-port P      Default 7770.
+  --no-auto-installs Do not auto-detect MT5 installs (default: every
+                     /Applications/MetaTrader 5*.app + net.metaquotes.wine.* prefix, managed).
+  --print-detected-installs  Print the installs block auto-detection would write; change nothing.
+                     (Must be the first argument.)
   --uninstall        Stop the LaunchAgent and remove the install directory.
                      Set KEEP_CONFIG=1 in env to keep config + logs.
   --skip-health      Don't curl /healthz after starting the daemon.
@@ -583,9 +690,9 @@ if [[ -f "${CONFIG_FILE}" && "${RECONFIGURE}" == 0 ]]; then
   note "Existing config at ${CONFIG_FILE} preserved (re-run with --reconfigure to overwrite)"
 else
   say "Configuring supervisor"
-  DAEMON_ID_DEFAULT="$(hostname -s | tr 'A-Z' 'a-z')-mac"
+  DAEMON_ID_DEFAULT="${ARG_DAEMON_ID:-$(hostname -s | tr 'A-Z' 'a-z')-mac}"
   prompt DAEMON_ID         "Daemon ID (unique across the fleet)"  "${DAEMON_ID_DEFAULT}"
-  prompt DAEMON_NAME       "Human-readable name"                  "Mac Wine (${USER})"
+  prompt DAEMON_NAME       "Human-readable name"                  "${ARG_DAEMON_NAME:-Mac Wine (${USER})}"
   # Detect the Docker-on-same-host case: the engine runs in a Docker
   # container on this Mac and the operator entered a localhost engine
   # URL.  In that topology a 127.0.0.1 bind + 127.0.0.1 callback is
@@ -597,8 +704,11 @@ else
   #   callback_base_url = http://host.docker.internal:<port>  (Docker DNS for host)
   # Without it, `0 install(s) advertised` or `Failed to reach daemon`
   # errors surface on the admin UI Terminals page.
-  prompt ENGINE_URL        "Engine API URL"                       "${DEFAULT_ENGINE_URL}"
-  if [[ "${ENGINE_URL}" == *"localhost"* || "${ENGINE_URL}" == *"127.0.0.1"* ]] \
+  prompt ENGINE_URL        "Engine API URL"                       "${ARG_ENGINE_URL:-${DEFAULT_ENGINE_URL}}"
+  if [[ -n "${ARG_BIND_HOST}" ]]; then
+    DEFAULT_BIND_HOST_NOW="${ARG_BIND_HOST}"
+    DEFAULT_CALLBACK_HOST=""
+  elif [[ "${ENGINE_URL}" == *"localhost"* || "${ENGINE_URL}" == *"127.0.0.1"* ]] \
      && docker info >/dev/null 2>&1; then
     DEFAULT_BIND_HOST_NOW="0.0.0.0"
     DEFAULT_CALLBACK_HOST="host.docker.internal"
@@ -608,7 +718,11 @@ else
     DEFAULT_CALLBACK_HOST=""   # empty → callback uses bind_host (loopback path)
   fi
   prompt BIND_HOST         "Bind host"                            "${DEFAULT_BIND_HOST_NOW}"
-  prompt BIND_PORT         "Bind port"                            "${DEFAULT_BIND_PORT}"
+  prompt BIND_PORT         "Bind port"                            "${ARG_BIND_PORT:-${DEFAULT_BIND_PORT}}"
+  ENROLLMENT_TOKEN="${ARG_ENROLLMENT_TOKEN}"
+  if [[ -z "${ENROLLMENT_TOKEN}" ]] && (( ! NON_INTERACTIVE )); then
+    prompt ENROLLMENT_TOKEN "Daemon enrollment token (lsc_enr_..., blank to skip)" ""
+  fi
   # Phase v0.2: daemon auto-bootstraps its JWT via POST
   # /admin/terminals/daemons/auth using daemon_api_key as the proof-of-
   # identity.  No operator JWT minting required.  Left blank in the
@@ -645,7 +759,11 @@ else
   # not directly).  An `-x` test misses this and falls through to the
   # empty-installs branch silently.
   WINE_BLOCK=""
-  if [[ -f "${DEFAULT_WINE_MT5_PATH}" ]]; then
+  if (( AUTO_INSTALLS )); then
+    WINE_BLOCK="$(detect_installs)"
+    note "Auto-detected installs:"
+    printf '%s\n' "${WINE_BLOCK}" | grep -E 'install_id|launch_mode' | sed 's/^/    /' || true
+  elif [[ -f "${DEFAULT_WINE_MT5_PATH}" ]]; then
     note "Detected Wine MT5 at ${DEFAULT_WINE_MT5_PATH} — seeding a default install entry"
     # Pull broker_name + account_login from the install's common.ini
     # if it's been launched at least once.  Empty values are written
@@ -707,6 +825,20 @@ engine_token: "${ENGINE_TOKEN}"
 daemon_api_key: "${DAEMON_API_KEY}"
 
 heartbeat_interval_sec: 30
+
+# Single-use Daemon enrollment token (console "Connect a supervisor").  Used once, while no
+# machine credential is stored, then ignored.
+enrollment_token: "${ENROLLMENT_TOKEN:-}"
+
+# Self-heal watchdog (keeps managed terminals running under the engine's desired state).
+watchdog:
+  enabled: true
+  max_restarts_per_hour: 3
+  max_restarts_per_day: 8
+
+# Pull job channel: the engine queues Start/Stop/Restart/Deploy/TailLog/Prune jobs and this
+# daemon long-polls for them, so the engine never needs to reach this host.
+jobs_enabled: true
 
 ${WINE_BLOCK}
 EOF

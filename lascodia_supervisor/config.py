@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -62,6 +62,43 @@ class MT5Install(BaseModel):
     # install whose data lives under %APPDATA%\MetaQuotes\Terminal\<hash>\MQL5.
     mql5_dir: Optional[str] = None
 
+    # ── Self-heal (2026-10-31) ─────────────────────────────────────────
+    # How the terminal is started.  ``app`` = ``open -a <app_path>`` — the macOS MetaTrader
+    # wrapper app, which is how the live terminals run (and the only way builds >= 6290 start
+    # under the Wine 11 wrapper).  ``wine`` = spawn ``wine64 terminal64.exe`` directly (cloned
+    # installs, Linux).  Unset = ``app`` when an app bundle is configured or found, else ``wine``.
+    launch_mode: Optional[Literal["app", "wine"]] = None
+    # The wrapper app bundle, e.g. "/Applications/MetaTrader 5 - exness.app".  Unset = the
+    # /Applications/MetaTrader 5*.app whose CFBundleIdentifier names this install's prefix.
+    app_path: Optional[str] = None
+    # True = the supervisor may keep this terminal running on its own (watchdog) before the
+    # engine has ever said what it wants.  False (default for hand-added entries) = hands off
+    # until the engine sends a desired state with autoHeal on.
+    managed: bool = False
+    # A live terminal whose every EA beacon stopped ticking this long ago counts as wedged.
+    wedge_after_sec: int = Field(default=300, ge=60, le=3600)
+
+
+class WatchdogConfig(BaseModel):
+    """Local auto-restart limits.  They mirror the engine's EA:AutoHeal limits (C8) so a host
+    cut off from the engine still behaves the same way."""
+    enabled: bool = True
+    # Waits between consecutive failed start attempts; the last one repeats.
+    start_backoff_sec: list[int] = Field(default_factory=lambda: [30, 120, 300, 900])
+    max_restarts_per_hour: int = Field(default=3, ge=1)
+    max_restarts_per_day: int = Field(default=8, ge=1)
+    # After the limits are hit (gave_up): one more try this often.
+    gave_up_retry_sec: int = Field(default=3600, ge=300)
+    # No wedge decision this soon after a launch or a host wake-up.
+    launch_grace_sec: int = Field(default=300, ge=30)
+    wake_grace_sec: int = Field(default=300, ge=0)
+    # A beacon saying init_failed after this many launches in a row = bad inputs: stop trying.
+    init_failed_launches: int = Field(default=3, ge=1)
+    # Journal corruption signals restart a terminal at most this often.
+    journal_restart_min_interval_sec: int = Field(default=3600, ge=600)
+    # Seconds to wait for each process to exit after SIGTERM before SIGKILL.
+    stop_grace_sec: int = Field(default=20, ge=1, le=120)
+
 
 class SupervisorConfig(BaseModel):
     daemon_id: str = Field(..., description="Globally-unique identifier for this daemon.")
@@ -100,6 +137,21 @@ class SupervisorConfig(BaseModel):
     # when LastSeenAt is older than 3x this.
     heartbeat_interval_sec: int = Field(default=30, ge=5, le=300)
     installs: list[MT5Install] = Field(default_factory=list)
+
+    # ── Self-heal (2026-10-31) ─────────────────────────────────────────
+    watchdog: WatchdogConfig = Field(default_factory=WatchdogConfig)
+    # Pull job channel (C4): long-poll the engine for StartTerminal / DeployEaBinary / ... jobs.
+    # Works from behind NAT — the engine never needs to reach this host.
+    jobs_enabled: bool = True
+    jobs_wait_sec: int = Field(default=20, ge=1, le=60)
+    # Where sessions, watchdog history and the engine's desired state are kept across restarts.
+    # Default: <config dir>/state.
+    state_dir: Optional[str] = None
+    # The supervisor's own rotating log (supervisor.log).  Default: <install root>/logs, the
+    # directory launchd's stdout/stderr files live in.
+    log_dir: Optional[str] = None
+    log_max_bytes: int = Field(default=20 * 1024 * 1024, ge=1024 * 1024)
+    log_backup_count: int = Field(default=5, ge=1, le=50)
 
 
 def default_config_path() -> Path:
@@ -181,6 +233,11 @@ def load_config() -> SupervisorConfig:
     cfg = SupervisorConfig(**raw)
     if not cfg.credential_path:
         cfg.credential_path = str(path.parent / "machine_credential.json")
+    if not cfg.state_dir:
+        cfg.state_dir = str(path.parent / "state")
+    if not cfg.log_dir:
+        # install.sh layout: <root>/config/supervisor.yaml + <root>/logs/
+        cfg.log_dir = str(path.parent.parent / "logs")
 
     # Backfill broker_name / account_login from each install's
     # common.ini when the operator left them blank.  Runs on every
