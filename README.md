@@ -175,6 +175,13 @@ host add `--reconfigure` (the daemon key is preserved).  `managed: true` means t
 an absent terminal as soon as the daemon runs, before the engine has sent any desired state — set
 `managed: false` on an install that must stay down.
 
+**If every engine call fails with `[Errno 65] No route to host`** while `curl` over SSH works, the
+host's `/etc/hosts` (or local DNS) points the engine name at a LAN address, and macOS 15 *Local
+Network* privacy blocks LAN connections from a launchd agent until someone clicks Allow on that
+Mac's screen. Set `engine_resolver: public` in `supervisor.yaml` and restart: the supervisor then
+resolves the engine through public DNS-over-HTTPS and connects over the internet (TLS still
+verified against the real name), leaving the LAN pin in place for the EAs. mac2 runs this way.
+
 ## Quickstart (macOS)
 
 ```bash

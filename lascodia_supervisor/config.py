@@ -112,6 +112,11 @@ class SupervisorConfig(BaseModel):
     # The engine's API root.  Daemon uses this for register + heartbeat.
     engine_url: str = Field(
         ..., description="Engine base URL, e.g. 'http://localhost:5081/api/v1/lascodia-trading-engine'.")
+    # How the engine hostname is resolved.  "system" = the OS resolver (honours /etc/hosts).
+    # "public" = DNS-over-HTTPS, ignoring /etc/hosts — for a host whose /etc/hosts pins the
+    # engine name to a LAN address that macOS Local Network privacy blocks for launchd agents
+    # (symptom: every engine call fails with "[Errno 65] No route to host").  See public_dns.py.
+    engine_resolver: Literal["system", "public"] = Field(default="system")
     # OPTIONAL after v0.2.  Pre-v0.2 builds required an operator to mint
     # a JWT manually and paste it here.  v0.2+ daemons bootstrap their
     # own JWT via POST /admin/terminals/daemons/auth using `daemon_api_key`

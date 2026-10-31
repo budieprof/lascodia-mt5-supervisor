@@ -80,6 +80,9 @@ class EngineClient:
 
         # httpx doesn't let us mutate the default Authorization header cleanly after
         # construction, so we build the header per-call in _bearer_headers() instead.
+        if transport is None and getattr(cfg, "engine_resolver", "system") == "public":
+            from .public_dns import PublicDnsTransport
+            transport = PublicDnsTransport()
         self._client = httpx.Client(
             base_url=cfg.engine_url.rstrip("/") + "/",
             timeout=15.0,
