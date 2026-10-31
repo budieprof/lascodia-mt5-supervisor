@@ -193,6 +193,8 @@ class BeaconAssessment(unittest.TestCase):
         self.assertTrue(v.fresh)
 
     def test_deinit_beacons_ignored(self):
+        v = assess([self.b("running", 7 * 3600, 7 * 3600)], NOW, 300, None)
+        self.assertEqual(v.count, 0)  # abandoned beacon (chart gone) is not evidence of a wedge
         v = assess([self.b("deinit", 9000, 9000)], NOW, 300, None)
         self.assertEqual(v.count, 0)
 

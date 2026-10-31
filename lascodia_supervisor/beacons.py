@@ -18,6 +18,11 @@ logger = logging.getLogger("lascodia.supervisor.beacons")
 
 MAX_BEACONS = 64
 MAX_BEACON_BYTES = 64 * 1024
+# A beacon nobody has rewritten for this long belongs to a chart that no longer exists (the EA
+# was removed while the terminal was down, so it never wrote "deinit").  Counting it forever
+# would restart a healthy terminal up to the daily limit, every day.  A real wedge older than
+# this is still caught by the engine's heartbeat ladder (C8 rung 3).
+ABANDONED_AFTER_SEC = 6 * 3600
 
 
 def parse_utc(value) -> Optional[float]:
@@ -84,7 +89,11 @@ class BeaconVerdict:
 
 
 def assess(beacons: list[dict], now: float, wedge_after_sec: int, launched_at: Optional[float]) -> BeaconVerdict:
-    live = [b for b in beacons if str(b.get("phase", "")).lower() != "deinit"]
+    def _last_seen(b: dict) -> float:
+        return max(parse_utc(b.get("writtenAtUtc")) or 0.0, parse_utc(b.get("lastTimerUtc")) or 0.0)
+
+    live = [b for b in beacons
+            if str(b.get("phase", "")).lower() != "deinit" and now - _last_seen(b) <= ABANDONED_AFTER_SEC]
     newest: Optional[float] = None
     init_failed = healthy = False
     reason = ""
