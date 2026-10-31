@@ -1079,7 +1079,13 @@ def build_router(state: AdminApiState, auth_dep) -> APIRouter:
         # Same path the LaunchAgent's StandardErrorPath points at.
         # Derived from the config-dir convention rather than read from
         # the plist to keep this resilient to operator-side renames.
-        log_path = state.config_path.parent.parent / "logs" / "stderr.log"
+        # supervisor.log (rotating, written by logsetup) since the self-heal release; fall back to
+        # launchd's stderr.log for a daemon still running an older build.
+        log_dir = Path(state.cfg.log_dir) if getattr(state.cfg, "log_dir", None) \
+            else state.config_path.parent.parent / "logs"
+        log_path = log_dir / "supervisor.log"
+        if not log_path.exists():
+            log_path = log_dir / "stderr.log"
         if not log_path.exists():
             return {"path": str(log_path), "lines": [], "available": False}
         # Read the tail by seeking ~ lines * 200 bytes back from EOF —

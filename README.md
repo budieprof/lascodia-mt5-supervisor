@@ -15,6 +15,8 @@ per broker account, which MT5 binds at the terminal-process level.
 ## Table of contents
 
 - [Architecture](#architecture)
+- [Self-healing (watchdog, job channel, beacons)](#self-healing-watchdog-job-channel-beacons)
+- [Setting up a second host (mac2)](#setting-up-a-second-host-mac2)
 - [Quickstart (macOS)](#quickstart-macos)
 - [`install.sh` reference](#installsh-reference)
 - [Configuration reference](#configuration-reference)
@@ -86,6 +88,92 @@ information*. The supervisor's job is "start / stop / report on MT5
 processes."
 
 ---
+
+## Self-healing (watchdog, job channel, beacons)
+
+The supervisor is the hands of the self-healing system: the only component on the host that can
+relaunch a dead or wedged terminal, deploy a new EA binary and read local logs.  Contracts C2,
+C4, C6 and C8 of the 2026-10-31 self-heal program.
+
+**Adoption.**  Every heartbeat the supervisor lists the host's processes, finds every
+`terminal64.exe` (psutil names it `wine`; its command line is the Windows path), and maps it to an
+install by Wine prefix — `WINEPREFIX` when readable, else the files it holds open (`lsof`), else
+the wrapper app it was started from.  A terminal the supervisor did not start (the hand-launched
+live ones) is **adopted**: tracked as a session (`adopted: true`), restartable, reported.  Sessions
+are persisted in `state/sessions.json`, so ids survive a supervisor restart.
+
+**Start / stop.**  `app` mode starts with `open -a <app_path>`.  Stop = SIGTERM `terminal64` →
+wait → SIGKILL; SIGTERM the wrapper (`<app>/Contents/MacOS/MetaTrader 5`) → wait → SIGKILL; then the
+prefix's `wineserver` if it lingers.  Killing only terminal64 leaves the wrapper behind, and
+`open -a` then launches nothing — so a start also clears a terminal-less wrapper first.
+
+**Watchdog** (`runtime.watchdog` in the heartbeat).  Obeys the engine's per-install desired state
+and auto-heal flag (heartbeat response; persisted in `state/desired_state.json`; never known ⇒
+`Running` + auto-heal for `managed: true`, else hands off):
+
+| Situation | Action |
+|---|---|
+| desired Running, auto-heal on, terminal absent | start (backoff 30 s / 2 m / 5 m / 15 m) |
+| terminal alive, every EA beacon older than `wedge_after_sec` | restart — not within 5 min of a launch or a wake from sleep; never on "no beacons" |
+| `init_failed` beacon after 3 launches in a row | `gave_up` (bad inputs); cleared by an operator start/restart |
+| journal: `old tick` stamped before 2000, bulk `invalid book item`, `debugger has been found` | restart, at most once per hour |
+| > 3 automatic restarts in an hour or > 8 in a day | `gave_up`, one retry per hour |
+| desired Stopped | never start; stop once when the engine *changes* it to Stopped |
+| auto-heal off | nothing at all |
+
+A restart only ever happens when the EA is already not working; open positions keep their
+broker-side SL/TP meanwhile.
+
+**Beacons** (C2).  Each EA writes `MQL5/Files/Lascodia/beacon/<instanceId>.json` every ≤ 15 s
+(works before sign-in).  The supervisor ships them verbatim in `runtime.beacons`.
+
+**Job channel** (C4).  The supervisor long-polls `GET admin/terminals/daemons/jobs?waitSec=20`
+(it also sends `daemonId=` for engines that key on it) and reports
+`POST admin/terminals/daemons/jobs/{jobId}/result {status, message, data}`.  Pull, not push: the
+engine never needs to reach this host, so hosts behind NAT work and `bind_host` can stay
+`127.0.0.1`.  Jobs: `StartTerminal`, `StopTerminal`, `RestartTerminal`,
+`DeployEaBinary {releaseId, sha256}` (downloads `platform/ea/releases/{id}/binary`, verifies the
+sha256, writes `MQL5/Experts/LascodiaEA.ex5` via a temp file + rename, keeps `LascodiaEA.ex5.prev`,
+returns `previousSha256` + `sha256`), `TailLog {kind: ea|journal|supervisor, instanceId?, lines ≤ 2000}`
+(UTF-16LE decoded, ≤ 1 MB), `PruneFiles {dryRun}` (dry run unless `dryRun: false`).
+
+**Prune** (C6).  Terminal `logs/` and `MQL5/Logs/` older than 14 days, EA `bridge_*.log` /
+`lascodia_*_YYYYMMDD.log` older than 14 days, and every artifact of an EA instance whose files have
+not changed for 30 days.  Never: the newest file of any kind, `config_override_*`, `apikey_*`,
+`machine_*`, `*.seq`, `*_state.json`, templates, profiles, `outbox/`, `retry_queue/`, `recovery/`,
+`deadletter/`, `config/`.
+
+**Logs.**  `logs/supervisor.log`, rotating 20 MB × 5.  launchd's `stdout.log` / `stderr.log` now
+only catch crashes before logging starts, and are trimmed at start-up when over 20 MB.
+
+**WebRequest allowlist.**  MT5's documented `/config:` startup file has no key for the
+WebRequest allowlist (`[Experts]` knows only `AllowLiveTrading`, `AllowDllImport`, `Enabled`,
+`Account`, `Profile`); forum reports say `WebRequest=` / `WebRequestUrl=` there are ignored.  So the
+supervisor does not try to seed it: add the engine URL once per prefix in Tools → Options →
+Expert Advisors (or clone a prefix that already has it).  The EA reports error 4014 in its
+heartbeat `diag.lastWebRequestError` when it is missing.
+
+## Setting up a second host (mac2)
+
+On the second Mac, with the repo checked out and the MetaTrader apps installed and signed in once:
+
+```bash
+cd ~/lascodia-mt5-supervisor
+./install.sh --non-interactive \
+  --daemon-id mac2-mac \
+  --daemon-name "mac2 (Wine)" \
+  --engine-url "http://<laptop LAN IP>:5081/api/v1/lascodia-trading-engine" \
+  --enrollment-token "lsc_enr_xxxxxxxx_<40 chars>"     # console → Terminals → Connect a supervisor
+```
+
+That auto-detects every `/Applications/MetaTrader 5*.app` and its prefix
+(`~/Library/Application Support/<bundle id>`) as an install with `launch_mode: app` and
+`managed: true`, keeps `bind_host: 127.0.0.1` (the pull job channel needs no inbound
+connection), writes `supervisor.yaml`, installs the LaunchAgent and health-checks it.  Preview the
+installs first with `./install.sh --print-detected-installs` (changes nothing).  On an existing
+host add `--reconfigure` (the daemon key is preserved).  `managed: true` means the watchdog starts
+an absent terminal as soon as the daemon runs, before the engine has sent any desired state — set
+`managed: false` on an install that must stay down.
 
 ## Quickstart (macOS)
 
@@ -192,8 +280,18 @@ installs. Override with the `LASCODIA_SUPERVISOR_CONFIG` env var.
 | `daemon_api_key` | yes | — | 32+ random chars. Proof-of-identity for `/daemons/auth` (legacy sign-in) and the `X-Daemon-Auth` secret the engine sends back. TOFU-pinned on the engine. |
 | `enrollment_token` | no | `""` | Single-use Daemon enrollment token (`lsc_enr_…`, 24 h) from the console. Exchanged once for the daemon's machine credential — see [Machine credentials](#machine-credentials-enrollment). |
 | `credential_path` | no | `machine_credential.json` next to `supervisor.yaml` | Where the machine credential is kept (mode 0600). |
-| `heartbeat_interval_sec` | no | `30` | Daemon→engine heartbeat cadence. Min 5, max 300. |
+| `heartbeat_interval_sec` | no | `30` | Daemon→engine heartbeat cadence. Min 5, max 300. Also the watchdog's evaluation cadence. |
 | `installs` | no | `[]` | List of MT5 installs this daemon can launch. |
+| `watchdog.enabled` | no | `true` | Master switch for the local watchdog. |
+| `watchdog.start_backoff_sec` | no | `[30, 120, 300, 900]` | Waits between failed start attempts (last one repeats). |
+| `watchdog.max_restarts_per_hour` / `_per_day` | no | `3` / `8` | Automatic starts + restarts per install; then `gave_up`, one retry per `gave_up_retry_sec` (3600). Operator jobs never count. |
+| `watchdog.launch_grace_sec` / `wake_grace_sec` | no | `300` / `300` | No wedge decision this soon after a launch / after the Mac wakes from sleep. |
+| `watchdog.init_failed_launches` | no | `3` | An `init_failed` beacon after this many launches in a row = bad inputs: stop restarting. |
+| `watchdog.journal_restart_min_interval_sec` | no | `3600` | Journal corruption restarts at most this often. |
+| `watchdog.stop_grace_sec` | no | `20` | SIGTERM → SIGKILL grace for terminal64. |
+| `jobs_enabled` / `jobs_wait_sec` | no | `true` / `20` | Pull job channel (long-poll). |
+| `state_dir` | no | `<config dir>/state` | `sessions.json`, `watchdog.json`, `desired_state.json`. |
+| `log_dir` / `log_max_bytes` / `log_backup_count` | no | `<install root>/logs` / 20 MB / 5 | Rotating `supervisor.log`. |
 
 ### Per-install fields (`installs[]`)
 
@@ -209,6 +307,10 @@ installs. Override with the `LASCODIA_SUPERVISOR_CONFIG` env var.
 | `broker_name` | no | autofill | Empty values are backfilled from `<executable dir>/config/common.ini`'s `Server=` field at daemon startup. |
 | `account_login` | no | autofill | Empty values are backfilled from `Login=` in the same file. |
 | `mql5_dir` | no | `<executable dir>/MQL5` | The terminal's MQL5 data folder, where an enrolled daemon drops the EA enrollment token before a launch. Set it for a Windows install whose data lives under `%APPDATA%`. |
+| `launch_mode` | no | `app` if a wrapper app is found, else `wine` | `app` = `open -a <app_path>` (how the live terminals run; client builds ≥ 6290 need the Wine 11 wrapper app). `wine` = spawn `wine64 terminal64.exe` directly. |
+| `app_path` | no | auto | The wrapper app, e.g. `/Applications/MetaTrader 5 - exness.app`. Auto = the `/Applications/MetaTrader 5*.app` whose `CFBundleIdentifier` is the prefix's directory name. |
+| `managed` | no | `false` | `true` = keep this terminal running (watchdog) even before the engine has sent a desired state. `false` = hands off until the engine says Running + auto-heal on. `install.sh` writes `true` for every auto-detected install. |
+| `wedge_after_sec` | no | `300` | A running terminal whose every EA beacon stopped ticking this long ago counts as wedged. |
 
 ### Autofill cascade
 
@@ -269,7 +371,7 @@ require an `X-Daemon-Auth` header carrying `daemon_api_key`.
 | `POST` | `/admin/daemon/reload-config` | Re-read `supervisor.yaml` without restarting the daemon. |
 | `POST` | `/admin/daemon/restart` | Self-exit with code 0 after a short delay so launchd's `KeepAlive=true` respawns a fresh process. Returns `202 Accepted` immediately. |
 | `POST` | `/admin/daemon/rotate-api-key` | Generate a new `daemon_api_key`, write to `supervisor.yaml`. Engine still has the OLD key pinned via TOFU — response carries the new key + the remediation steps the operator must run. |
-| `GET` | `/admin/logs/tail?lines=200` | Tail the daemon's stderr log. `lines` clamps to `[1, 2000]`. |
+| `GET` | `/admin/logs/tail?lines=200` | Tail the daemon's `supervisor.log` (falls back to `stderr.log`). `lines` clamps to `[1, 2000]`. |
 | `GET` | `/admin/config` | Return the running `supervisor.yaml` as JSON with `daemon_api_key` + `engine_token` redacted. |
 
 ### Engine endpoints (daemon → engine)
@@ -651,10 +753,13 @@ daemon logs the error and keeps retrying — no data loss, just stuck.
 ~/Library/Application Support/Lascodia/supervisor/
 ├── .venv/                    # Python virtualenv, daemon deps live here
 ├── config/
-│   └── supervisor.yaml       # The config file (mode 600)
+│   ├── supervisor.yaml       # The config file (mode 600)
+│   ├── machine_credential.json
+│   └── state/                # sessions.json, watchdog.json, desired_state.json
 └── logs/
-    ├── stdout.log            # Daemon stdout (FastAPI request log)
-    └── stderr.log            # Daemon stderr (Python logger output)
+    ├── supervisor.log        # All logging, rotating 20 MB x 5 (+ .1 .. .5)
+    ├── stdout.log            # launchd catch-all (crashes before logging starts); trimmed at start-up
+    └── stderr.log            # launchd catch-all; trimmed at start-up when over 20 MB
 
 ~/Library/LaunchAgents/
 └── com.lascodia.supervisor.plist

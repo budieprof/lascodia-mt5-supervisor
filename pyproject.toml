@@ -1,6 +1,6 @@
 [project]
 name = "lascodia-mt5-supervisor"
-version = "0.1.0"
+version = "0.3.0"
 description = "Sidecar daemon for the Lascodia Trading Engine — supervises MT5 terminal lifecycles per broker account."
 requires-python = ">=3.11"
 dependencies = [
@@ -11,6 +11,9 @@ dependencies = [
     "psutil>=5.9",
     "pydantic>=2.0",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
 
 [project.scripts]
 lascodia-supervisor = "lascodia_supervisor.main:run"
