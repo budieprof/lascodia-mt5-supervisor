@@ -70,6 +70,8 @@ class EngineClient:
         self._legacy_retired = False
         self._enrollment_spent = False
         self.jobs_unsupported = False
+        # A plain sentence for the installer / status file when the last engine call failed.
+        self.last_error = ""
         # The heartbeat and the job-poll loop run on different threads with this one client:
         # sign-in (and the single-use enrollment exchange) must happen once, not twice in parallel.
         self._auth_lock = threading.RLock()
@@ -80,9 +82,9 @@ class EngineClient:
 
         # httpx doesn't let us mutate the default Authorization header cleanly after
         # construction, so we build the header per-call in _bearer_headers() instead.
-        if transport is None and getattr(cfg, "engine_resolver", "system") == "public":
-            from .public_dns import PublicDnsTransport
-            transport = PublicDnsTransport()
+        if transport is None:
+            from .resolver import transport_for
+            transport = transport_for(getattr(cfg, "engine_resolver", "auto"))
         self._client = httpx.Client(
             base_url=cfg.engine_url.rstrip("/") + "/",
             timeout=15.0,
@@ -146,6 +148,8 @@ class EngineClient:
                 legacy_only = True
 
         if self._legacy_retired:
+            self.last_error = ("This computer has no sign-in for the engine yet. In the console, click Add a "
+                               "computer and paste the new line here.")
             logger.error(
                 "daemon has no machine credential and the engine retired daemon-key sign-in — set "
                 "enrollment_token in supervisor.yaml (a Daemon token from the console) and restart")
@@ -215,6 +219,8 @@ class EngineClient:
         if outcome != _FALLBACK:
             # Used, expired, revoked, wrong kind, another organisation's daemon id: never again.
             self._enrollment_spent = True
+            self.last_error = ("The install code was not accepted (it may have expired or already been used). "
+                               "In the console, click Add a computer again to get a fresh line.")
             logger.error("enrollment refused (HTTP %d): %s — ask for a new Daemon enrollment token",
                          resp.status_code, payload.get("message", "<no message>"))
             return _DEAD
@@ -296,6 +302,8 @@ class EngineClient:
                 resp = self._client.request(method, url, headers=headers, **kwargs)
             except httpx.HTTPError as ex:
                 logger.warning("%s %s transport error: %s", method, url, ex)
+                self.last_error = (f"Cannot reach the engine at {self._cfg.engine_url} ({type(ex).__name__}). "
+                                   "Check this computer's internet connection.")
                 return None
 
             if resp.status_code != 401 or attempt == 2:
@@ -330,9 +338,15 @@ class EngineClient:
             return None
         try:
             resp.raise_for_status()
+            self.last_error = ""
             return resp.json()
         except httpx.HTTPError as ex:
             logger.error("register failed: %s", ex)
+            if resp.status_code in (401, 403) and not self.last_error:
+                self.last_error = ("The engine refused this computer's sign-in. In the console, click Add a "
+                                   "computer and paste the new line here.")
+            elif not self.last_error or resp.status_code >= 500:
+                self.last_error = f"The engine answered HTTP {resp.status_code} when this computer tried to connect."
             return None
 
     def heartbeat(self, sessions_payload: list[dict],
@@ -341,12 +355,15 @@ class EngineClient:
         return ok
 
     def heartbeat_ex(self, sessions_payload: list[dict],
-                     installs_payload: Optional[list[dict]] = None) -> tuple[bool, dict]:
+                     installs_payload: Optional[list[dict]] = None,
+                     extra: Optional[dict] = None) -> tuple[bool, dict]:
         """Heartbeat, returning (ok, response body).  The body carries the engine's per-install
-        desired state (contract C4) — see desired.extract_desired."""
+        desired state (contract C4) — see desired.extract_desired — and, C9, ``supervisorUpdate``.
+        ``extra`` adds top-level fields (``supervisorVersion``, ``platform``)."""
         body = {
             "daemonId": self._cfg.daemon_id,
             "sessions": sessions_payload,
+            **(extra or {}),
         }
         # Heartbeat also carries the current installs list so the engine's
         # InstallsJson cache picks up out-of-band changes (operator edits
@@ -384,6 +401,8 @@ class EngineClient:
             logger.warning("job poll: HTTP %d", resp.status_code)
             return None
         self.jobs_unsupported = False
+        # A plain sentence for the installer / status file when the last engine call failed.
+        self.last_error = ""
         try:
             payload = resp.json()
         except ValueError:
@@ -430,6 +449,17 @@ class EngineClient:
             return None, "release response held no binary"
         if not resp.content:
             return None, "empty binary"
+        return resp.content, ""
+
+    def download_supervisor_release(self, release_id) -> tuple[Optional[bytes], str]:
+        """C9 self-update: ``GET platform/supervisor/releases/{id}/binary`` with the daemon token."""
+        resp = self._request_with_auth("GET", f"platform/supervisor/releases/{release_id}/binary", timeout=300)
+        if resp is None:
+            return None, "engine unreachable"
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}"
+        if not resp.content:
+            return None, "empty download"
         return resp.content, ""
 
     def request_terminal_enrollment_token(self, account_login: str, broker_server: str,

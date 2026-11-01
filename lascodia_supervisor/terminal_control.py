@@ -125,6 +125,14 @@ class TerminalController:
                     self._term_then_kill(d.wrapper_pid, "orphaned wrapper app", 10)
                 logger.info("install %s: open -a %s (%s)", install.install_id, shlex.quote(app), reason)
                 self.ops.open_app(app, list(install.extra_args))
+            elif mode == "native":
+                # Windows: terminal64.exe straight in this user's session — no wrapper, no wineserver.
+                exe = os.path.expanduser(install.executable)
+                if not os.path.isfile(exe):
+                    return ActionResult(False, f"cannot start: {exe} not found")
+                argv = [exe, *install.extra_args]
+                logger.info("install %s: starting %s (%s)", install.install_id, exe, reason)
+                self.ops.spawn(argv, dict(os.environ), os.path.dirname(exe))
             else:
                 argv = build_wine_command(install)
                 logger.info("install %s: spawning %s (%s)", install.install_id,

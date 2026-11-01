@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel
 import uvicorn
 
+from . import __version__, layout
 from .admin_api import AdminApiState, build_router as build_admin_router
 from .config import SupervisorConfig, default_config_path, load_config
 from .engine_client import EngineClient
@@ -21,6 +22,8 @@ from .logsetup import setup_logging, supervisor_log_path
 from .machine_credentials import prepare_terminal_enrollment
 from .process_manager import ProcessManager
 from .runtime import FAILED, Supervisor
+from .selfupdate import Updater, extract_offer
+from .status import write_status
 
 logger = logging.getLogger("lascodia.supervisor")
 
@@ -44,6 +47,14 @@ class _State:
     sup: Supervisor
     heartbeat_task: Optional[asyncio.Task] = None
     jobs_task: Optional[asyncio.Task] = None
+    updater: Optional[Updater] = None
+    update_task: Optional[asyncio.Task] = None
+    registered: bool = False
+    running_jobs: set = set()
+
+    def busy(self) -> bool:
+        """No self-update while a job or a terminal action is in flight."""
+        return bool(self.running_jobs) or (getattr(self, "sup", None) is not None and self.sup.any_busy())
 
     def reload_config(self) -> None:
         """Re-read supervisor.yaml and rebuild the EngineClient so its
@@ -111,14 +122,83 @@ async def _heartbeat_loop() -> None:
             # supervisor's own threads), then report the C4 runtime and take the engine's
             # desired state back.  Blocking work stays off the event loop.
             await asyncio.to_thread(STATE.sup.tick)
+            if not STATE.registered:
+                # The engine was unreachable (or refused us) at start-up: keep trying to register.
+                if await asyncio.to_thread(STATE.engine.register, _installs_payload(STATE.cfg)) is not None:
+                    _note_registered()
             sessions_payload = [s.to_payload() for s in STATE.pm.list_sessions()]
             installs_payload = STATE.sup.installs_payload(_installs_payload(STATE.cfg))
-            ok, body = await asyncio.to_thread(STATE.engine.heartbeat_ex, sessions_payload, installs_payload)
+            ok, body = await asyncio.to_thread(
+                STATE.engine.heartbeat_ex, sessions_payload, installs_payload,
+                {"supervisorVersion": __version__, "platform": layout.platform_tag()})
             if ok:
                 STATE.sup.apply_heartbeat_response(body)
+                if STATE.registered:
+                    _note_registered(heartbeat=True)
+                _consider_update(body)
+            else:
+                write_status(STATE.cfg.state_dir, lastError=STATE.engine.last_error or
+                             "The engine did not accept this computer's heartbeat.")
+            _check_update_deadline()
         except Exception:
             logger.exception("heartbeat loop iteration failed; will retry next tick")
         await asyncio.sleep(STATE.cfg.heartbeat_interval_sec)
+
+
+def _note_registered(heartbeat: bool = False) -> None:
+    import time as _t
+    first = not STATE.registered
+    STATE.registered = True
+    fields = {"registered": True, "lastError": "", "installCount": len(STATE.cfg.installs)}
+    if first:
+        fields["registeredAt"] = _t.time()
+    if heartbeat:
+        fields["lastHeartbeatAt"] = _t.time()
+    write_status(STATE.cfg.state_dir, **fields)
+    if first:
+        logger.info("registered with engine — daemon_id=%s", STATE.cfg.daemon_id)
+    if STATE.updater is not None and STATE.updater.enabled:
+        STATE.updater.confirm()
+
+
+def _request_restart(why: str) -> None:
+    """Exit gracefully; launchd (KeepAlive) / the Scheduled Task launcher starts ``current`` again."""
+    logger.warning("restarting the supervisor: %s", why)
+    signal.raise_signal(signal.SIGTERM)
+
+
+def _check_update_deadline() -> None:
+    up = STATE.updater
+    if up is None or not up.enabled:
+        return
+    res = up.check_deadline()
+    if res is not None:
+        write_status(STATE.cfg.state_dir, lastUpdate=res.message)
+        if res.restart:
+            _request_restart(res.message)
+
+
+def _consider_update(body: dict) -> None:
+    up = STATE.updater
+    if up is None or (STATE.update_task is not None and not STATE.update_task.done()):
+        return
+    offer = extract_offer(body)
+    if offer is None:
+        return
+    go, why = up.consider(offer, STATE.busy)
+    if not go:
+        logger.debug("self-update: %s", why)
+        return
+    logger.warning("self-update: %s", why)
+
+    async def _apply() -> None:
+        res = await asyncio.to_thread(up.apply, offer, STATE.busy)
+        write_status(STATE.cfg.state_dir, lastUpdate=res.message)
+        (logger.warning if res.ok else logger.error)("self-update: %s", res.message)
+        if res.restart:
+            _request_restart(res.message)
+
+    STATE.update_task = asyncio.create_task(_apply())
 
 
 async def _jobs_loop() -> None:
@@ -127,6 +207,7 @@ async def _jobs_loop() -> None:
     pending: list[tuple] = []
     backoff = 5
     running: set[asyncio.Task] = set()
+    STATE.running_jobs = running
 
     async def run_one(job: dict) -> None:
         jid = job.get("jobId")
@@ -172,9 +253,17 @@ async def _jobs_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import time as _t
     STATE.cfg = load_config()
     setup_logging(STATE.cfg)
     STATE.engine = EngineClient(STATE.cfg)
+    STATE.registered = False
+    root = layout.install_root()
+    STATE.updater = Updater(root, download=lambda rid: STATE.engine.download_supervisor_release(rid))
+    logger.info("lascodia supervisor %s (%s) starting; %s", __version__, layout.platform_tag(),
+                f"bundle install at {root}" if root else "not a bundle install — self-update off")
+    write_status(STATE.cfg.state_dir, startedAt=_t.time(), pid=os.getpid(), version=__version__,
+                 registered=False, registeredAt=0, lastError="", installCount=len(STATE.cfg.installs))
 
     def _before_launch(install) -> None:
         # Multi-tenancy Phase 5: hand a terminal without a machine credential an EA enrollment token.
@@ -186,11 +275,13 @@ async def lifespan(app: FastAPI):
 
     # Register with the engine.  Failure here is non-fatal — operator can fix
     # config + restart, and the heartbeat loop will retry on every tick.
-    reg = STATE.engine.register(_installs_payload(STATE.cfg))
+    reg = await asyncio.to_thread(STATE.engine.register, _installs_payload(STATE.cfg))
     if reg is not None:
-        logger.info("registered with engine — daemon_id=%s", STATE.cfg.daemon_id)
+        _note_registered()
     else:
         logger.warning("initial register failed; will retry via heartbeat loop")
+        write_status(STATE.cfg.state_dir, lastError=STATE.engine.last_error or
+                     "The engine did not accept this computer's registration yet.")
 
     STATE.heartbeat_task = asyncio.create_task(_heartbeat_loop())
     STATE.jobs_task = asyncio.create_task(_jobs_loop())
@@ -210,7 +301,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Lascodia MT5 Supervisor",
-    version="0.3.0",
+    version=__version__,
     lifespan=lifespan,
 )
 

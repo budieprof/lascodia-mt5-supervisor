@@ -132,8 +132,41 @@ def select(terminal_dir: Path, mql5: Path, now: Optional[float] = None, log_days
     return sorted(picked.values(), key=lambda c: str(c.path))
 
 
-def run(terminal_dir: Path, mql5: Path, dry_run: bool = True, now: Optional[float] = None) -> dict:
+def _key(path) -> str:
+    import os
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def run(terminal_dir: Path, mql5: Path, dry_run: bool = True, now: Optional[float] = None,
+        paths: Optional[list] = None) -> dict:
+    """Select (and, unless ``dry_run``, delete) what the rules allow.
+
+    ``paths`` = exactly the list an operator reviewed (absolute paths as a dry run returned them
+    in ``files[].path``): only those are touched, and each only if it is still in a fresh
+    selection right now — inside an allowed folder, not a protected kind, not the newest of its
+    kind, still old enough.  The rest are reported in ``skipped`` and left alone."""
     cands = select(terminal_dir, mql5, now)
+    skipped: list[dict] = []
+    if paths is not None:
+        current = {_key(c.path): c for c in cands}
+        chosen: dict[str, Candidate] = {}
+        for raw in paths:
+            text = str(raw or "")
+            if not text or not Path(text).is_absolute():
+                skipped.append({"path": text, "reason": "not an absolute path"})
+                continue
+            k = _key(text)
+            if k in chosen:
+                continue
+            c = current.get(k)
+            if c is not None:
+                chosen[k] = c
+            elif not Path(text).exists():
+                skipped.append({"path": text, "reason": "already gone"})
+            else:
+                skipped.append({"path": text, "reason": "no longer allowed to be deleted (protected, the newest "
+                                                        "of its kind, recently changed, or outside the prune folders)"})
+        cands = sorted(chosen.values(), key=lambda c: str(c.path))
     deleted, failed = 0, []
     freed = 0
     if not dry_run:
@@ -142,11 +175,13 @@ def run(terminal_dir: Path, mql5: Path, dry_run: bool = True, now: Optional[floa
                 c.path.unlink()
                 deleted += 1
                 freed += c.bytes
+            except FileNotFoundError:
+                skipped.append({"path": str(c.path), "reason": "already gone"})
             except OSError as ex:
                 failed.append(f"{c.path.name}: {type(ex).__name__}")
         logger.info("prune %s: deleted %d file(s), %d bytes", terminal_dir, deleted, freed)
     total = sum(c.bytes for c in cands)
-    return {
+    out = {
         "dryRun": dry_run,
         "fileCount": len(cands),
         "totalBytes": total,
@@ -156,3 +191,8 @@ def run(terminal_dir: Path, mql5: Path, dry_run: bool = True, now: Optional[floa
         "files": [{"path": str(c.path), "bytes": c.bytes, "reason": c.reason} for c in cands[:MAX_LISTED]],
         "truncated": len(cands) > MAX_LISTED,
     }
+    if paths is not None:
+        out["requestedCount"] = len(paths)
+        out["skipped"] = skipped[:MAX_LISTED]
+        out["skippedCount"] = len(skipped)
+    return out

@@ -12,12 +12,150 @@ per broker account, which MT5 binds at the terminal-process level.
 
 ---
 
+## Install on a computer (one line)
+
+This is how an organisation connects a computer that runs MetaTrader 5. No git, no Python, no
+flags, no config files.
+
+1. In the console, go to **Terminals → Add a computer** and pick **macOS** or **Windows**.
+2. Copy the one line it shows and paste it into **Terminal** (macOS) or **PowerShell** (Windows):
+
+   ```sh
+   # macOS
+   curl -fsSL https://app.codiapay.com/api/v1/lascodia-trading-engine/onboarding/supervisor/install.sh | sh -s -- lsc_enr_xxxxxxxx_...
+   ```
+   ```powershell
+   # Windows (Windows PowerShell 5.1 or PowerShell 7; no administrator needed)
+   & ([scriptblock]::Create((irm https://app.codiapay.com/api/v1/lascodia-trading-engine/onboarding/supervisor/install.ps1))) lsc_enr_xxxxxxxx_...
+   ```
+3. It prints `Connected: 3 terminals found. Go back to the console to finish.` The console page
+   flips from "Waiting for your computer…" to "Connected" and walks the last manual step per
+   terminal (adding the engine address to MetaTrader's WebRequest list; MetaTrader offers no
+   supported way to set it from outside).
+
+The `lsc_enr_…` code in the line is a single-use Daemon enrollment code, bound to your
+organisation. It downloads the supervisor and enrolls this computer once. After that, the computer
+signs in with its own machine credential.
+
+**What the line does**
+- **Checks the platform and downloads the bundle.** The bundle is `macos-arm64`,
+  `macos-x86_64` or `windows-x64`, fetched from
+  `onboarding/supervisor/bundle?platform=…`. The install code goes in the
+  `X-Enrollment-Token` header, so it never appears in the process list. The script then
+  checks the download's sha256 against the engine's `X-Bundle-Sha256`.
+- **Installs the bundle.** A bundle contains its own CPython 3.12
+  (python-build-standalone), the pinned dependencies, the supervisor itself, `VERSION`
+  and `MANIFEST.sha256`. Nothing is installed system-wide. Before switching to a new bundle,
+  the script runs the bundled Python and checks the manifest.
+  - macOS installs into `~/Library/Application Support/Lascodia/supervisor`, for this user
+    only.
+  - Windows installs into `%ProgramData%\Lascodia\Supervisor`. The `config` folder there is
+    locked down so only this user, SYSTEM and Administrators can read it.
+- **Finds every MetaTrader 5 install.**
+  - macOS: `/Applications/MetaTrader 5*.app` together with its Wine prefix. These are
+    `launch_mode: app`, `managed: true`. A Wine prefix with no app is added as
+    `managed: false`.
+  - Windows: `terminal64.exe` under `Program Files\*MetaTrader*`, mapped to its data folder
+    via `%APPDATA%\MetaQuotes\Terminal\<hash>\origin.txt`. These are
+    `launch_mode: native`, `managed: true`.
+  - Preview what would be found, without changing anything:
+    `<root>/current/python/bin/python3 -m lascodia_supervisor detect-installs`.
+- **Writes `config/supervisor.yaml`.** It contains:
+  - `daemon_id` = the hostname plus 4 random characters;
+  - `engine_resolver: auto`;
+  - `bind_host: 127.0.0.1` (the job channel is pull, so no inbound access is needed);
+  - a free port starting at 7770;
+  - every detected terminal.
+- **Starts the supervisor.**
+  - macOS: the LaunchAgent `com.lascodia.supervisor` (KeepAlive, `AbandonProcessGroup`, so
+    terminals survive a supervisor restart) runs `bin/run.sh`.
+  - Windows: the Scheduled Task **Lascodia Supervisor**, at logon of the installing user, runs
+    `bin\run.ps1`. MetaTrader is a desktop app and must run in that user's session. If the
+    computer forbids a normal user from adding a logon task, it falls back to the user's Run key.
+- **Waits up to 60 s for registration.** If the supervisor has not registered with the engine
+  by then, the script prints exactly what failed (code refused, engine unreachable, …).
+
+**Pasting it again** upgrades in place. It keeps:
+- the computer's identity: `daemon_id`, the daemon key and the machine credential;
+- the engine address;
+- every configured terminal, including `managed: false` set by hand.
+
+It only adds newly found terminals. If nothing changed, the config file is not rewritten.
+
+**Uninstall:** run the same line with `--uninstall` in place of the code. This removes the
+supervisor, its settings and its credential. It never touches the terminals. To connect the
+computer again, use a fresh line from the console.
+
+### Updates
+
+The supervisor keeps itself up to date:
+
+1. Every heartbeat sends `supervisorVersion` and `platform`.
+2. When a newer release for the platform exists and `Supervisor:AutoUpdate` is on, the engine
+   answers with `supervisorUpdate`.
+3. The supervisor installs the update, but never during a job or a terminal start/stop. It:
+   - downloads the release with its own token and verifies the sha256 and the manifest;
+   - smoke-tests the new Python;
+   - unpacks it into `versions/<v>/`;
+   - points `current` at it (a symlink on macOS, `current.txt` on Windows);
+   - exits, so launchd or the launcher loop starts the new version.
+4. The new version must register within 120 s. If it does not:
+   - if it is running, it switches back itself;
+   - if it cannot even start, `bin/run.sh` / `run.ps1` switches back on the next start.
+
+   The rolled-back version is written to `update.bad` and never tried again. The three newest
+   versions are kept.
+
+A developer checkout (`pip install -e`, like the engine laptop's own supervisor) is never
+self-updated.
+
+### Building and publishing bundles (maintainers)
+
+```bash
+make bundle               # dist/bundles/lascodia-supervisor-<v>-{macos-arm64,macos-x86_64}.tar.gz + -windows-x64.zip
+make e2e                  # install.sh + the built bundle against a stub engine, temp HOME, fake launchctl
+LASCODIA_ADMIN_TOKEN=… make publish-bundle     # POST platform/supervisor/releases (LASCODIA_API_BASE optional)
+make publish-bundle-dry   # show what would be uploaded
+```
+
+Bump `__version__` (`lascodia_supervisor/__init__.py`) and `pyproject.toml` together. Running
+supervisors pick up the new release on their next heartbeat after it is published.
+
+The bootstrap scripts are `bootstrap/install.sh` (POSIX sh) and `bootstrap/install.ps1` (ASCII,
+PowerShell 5.1 compatible). The engine serves them publicly, with its own API base substituted
+for `__LASCODIA_API_BASE__`.
+
+### Runtime layout (bundle installs)
+
+```
+<root>/versions/<v>/      unpacked bundles (python/, launcher/, bootstrap/, VERSION, MANIFEST.sha256)
+<root>/current            -> versions/<v>   (Windows: current.txt)
+<root>/bin/run.sh|run.ps1 the launcher (rollback check, then current's python -I -m lascodia_supervisor run)
+<root>/config/            supervisor.yaml, machine_credential.json, state/ (status.json, sessions, watchdog)
+<root>/logs/              supervisor.log (rotating), launcher.log, stdout/stderr
+<root>/update.pending|.bad|.last|.rolledback
+```
+
+`python -m lascodia_supervisor` subcommands: `run`, `version`, `platform`, `detect-installs`,
+`setup`, `wait-registered`, `verify-bundle`.
+
+### `engine_resolver`
+
+The default is `auto`: the system resolver, which honours `/etc/hosts`. It switches to `public`
+for the rest of the process in one case only: a connection to a private or link-local address
+fails with `EHOSTUNREACH`, `ENETUNREACH` or `EPERM`. That is macOS 15 *Local Network* privacy
+blocking a launchd agent's connection to a LAN pin. The switch is logged once. Failures against
+a public address never switch. `system` and `public` force one behaviour.
+
+---
+
 ## Table of contents
 
+- [Install on a computer (one line)](#install-on-a-computer-one-line)
 - [Architecture](#architecture)
 - [Self-healing (watchdog, job channel, beacons)](#self-healing-watchdog-job-channel-beacons)
-- [Setting up a second host (mac2)](#setting-up-a-second-host-mac2)
-- [Quickstart (macOS)](#quickstart-macos)
+- [Advanced: install from a checkout (mac2 recipe)](#advanced-install-from-a-checkout-mac2-recipe)
+- [Advanced: developer quickstart (macOS)](#advanced-developer-quickstart-macos)
 - [`install.sh` reference](#installsh-reference)
 - [Configuration reference](#configuration-reference)
 - [HTTP API](#http-api)
@@ -153,9 +291,9 @@ supervisor does not try to seed it: add the engine URL once per prefix in Tools 
 Expert Advisors (or clone a prefix that already has it).  The EA reports error 4014 in its
 heartbeat `diag.lastWebRequestError` when it is missing.
 
-## Setting up a second host (mac2)
+## Advanced: install from a checkout (mac2 recipe)
 
-On the second Mac, with the repo checked out and the MetaTrader apps installed and signed in once:
+The [one-line install](#install-on-a-computer-one-line) replaces this for everyone else. On the second Mac, with the repo checked out and the MetaTrader apps installed and signed in once:
 
 ```bash
 cd ~/lascodia-mt5-supervisor
@@ -178,11 +316,13 @@ an absent terminal as soon as the daemon runs, before the engine has sent any de
 **If every engine call fails with `[Errno 65] No route to host`** while `curl` over SSH works, the
 host's `/etc/hosts` (or local DNS) points the engine name at a LAN address, and macOS 15 *Local
 Network* privacy blocks LAN connections from a launchd agent until someone clicks Allow on that
-Mac's screen. Set `engine_resolver: public` in `supervisor.yaml` and restart: the supervisor then
+Mac's screen. The default `engine_resolver: auto` now handles this by itself; `engine_resolver: public` forces it: the supervisor then
 resolves the engine through public DNS-over-HTTPS and connects over the internet (TLS still
 verified against the real name), leaving the LAN pin in place for the EAs. mac2 runs this way.
 
-## Quickstart (macOS)
+## Advanced: developer quickstart (macOS)
+
+For working on the supervisor itself (editable install, never self-updated).
 
 ```bash
 cd lascodia-mt5-supervisor
@@ -314,7 +454,7 @@ installs. Override with the `LASCODIA_SUPERVISOR_CONFIG` env var.
 | `broker_name` | no | autofill | Empty values are backfilled from `<executable dir>/config/common.ini`'s `Server=` field at daemon startup. |
 | `account_login` | no | autofill | Empty values are backfilled from `Login=` in the same file. |
 | `mql5_dir` | no | `<executable dir>/MQL5` | The terminal's MQL5 data folder, where an enrolled daemon drops the EA enrollment token before a launch. Set it for a Windows install whose data lives under `%APPDATA%`. |
-| `launch_mode` | no | `app` if a wrapper app is found, else `wine` | `app` = `open -a <app_path>` (how the live terminals run; client builds ≥ 6290 need the Wine 11 wrapper app). `wine` = spawn `wine64 terminal64.exe` directly. |
+| `launch_mode` | no | Windows: `native`; else `app` if a wrapper app is found, else `wine` | `app` = `open -a <app_path>` (how the live terminals run; client builds ≥ 6290 need the Wine 11 wrapper app). `wine` = spawn `wine64 terminal64.exe` directly. `native` = Windows: start `terminal64.exe` directly in the user's session; stop = close request (`taskkill /PID`) → kill. |
 | `app_path` | no | auto | The wrapper app, e.g. `/Applications/MetaTrader 5 - exness.app`. Auto = the `/Applications/MetaTrader 5*.app` whose `CFBundleIdentifier` is the prefix's directory name. |
 | `managed` | no | `false` | `true` = keep this terminal running (watchdog) even before the engine has sent a desired state. `false` = hands off until the engine says Running + auto-heal on. `install.sh` writes `true` for every auto-detected install. |
 | `wedge_after_sec` | no | `300` | A running terminal whose every EA beacon stopped ticking this long ago counts as wedged. |

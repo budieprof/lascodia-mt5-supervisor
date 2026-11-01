@@ -81,14 +81,27 @@ def install_prefix(install) -> Optional[str]:
 
 
 def terminal_dir(install) -> Path:
-    """Directory holding terminal64.exe (and logs/, MQL5/, config/)."""
+    """Directory holding terminal64.exe (and, for portable / Wine installs, logs/, MQL5/, config/)."""
     return Path(os.path.expanduser(install.executable)).parent
 
 
 def mql5_dir(install) -> Path:
+    """The install's MQL5 folder: ``mql5_dir``, else ``MQL5`` next to terminal64.exe."""
     if getattr(install, "mql5_dir", None):
         return Path(os.path.expanduser(install.mql5_dir))
     return terminal_dir(install) / "MQL5"
+
+
+def data_dir(install) -> Path:
+    """The terminal's data folder (holds MQL5/, logs/, config/).  On Windows a normal install keeps
+    it under ``%APPDATA%\\MetaQuotes\\Terminal\\<hash>`` (``mql5_dir`` points there); a portable
+    install and the macOS Wine layout keep it next to terminal64.exe."""
+    return mql5_dir(install).parent
+
+
+def journal_dir(install) -> Path:
+    """Where the terminal writes its journal (``<data>/logs/YYYYMMDD.log``)."""
+    return data_dir(install) / "logs"
 
 
 def bundle_identifier(app_path: str) -> Optional[str]:
@@ -123,11 +136,28 @@ def resolve_app_path(install, apps_dir: str = APPLICATIONS_DIR) -> Optional[str]
     return find_app_for_prefix(install_prefix(install), apps_dir)
 
 
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
 def effective_launch_mode(install, apps_dir: str = APPLICATIONS_DIR) -> str:
+    """``app`` (macOS wrapper app), ``wine`` (spawn wine64 terminal64.exe) or ``native`` (Windows:
+    start terminal64.exe directly).  Unset = native on Windows, else app when a wrapper app is
+    configured or found, else wine."""
     mode = getattr(install, "launch_mode", None)
-    if mode in ("app", "wine"):
+    if mode in ("app", "wine", "native"):
         return mode
+    if is_windows():
+        return "native"
     return "app" if resolve_app_path(install, apps_dir) else "wine"
+
+
+def exe_key(path: Optional[str]) -> str:
+    """Case- and separator-insensitive key for a Windows executable path (works on any host, so the
+    Windows mapping is testable on a Mac)."""
+    if not path:
+        return ""
+    return path.strip().strip('"').replace("\\", "/").rstrip("/").lower()
 
 
 # ── discovery ────────────────────────────────────────────────────────────────
@@ -155,7 +185,11 @@ def discover(installs: Iterable, procs: list[ProcInfo],
     installs = list(installs)
     by_prefix: dict[str, str] = {}
     by_app: dict[str, str] = {}
+    by_exe: dict[str, str] = {}   # native (Windows) installs: one terminal64.exe per install folder
     for inst in installs:
+        if effective_launch_mode(inst, apps_dir) == "native":
+            by_exe[exe_key(inst.executable)] = inst.install_id
+            continue
         pre = install_prefix(inst)
         if pre:
             by_prefix[_norm(pre)] = inst.install_id
@@ -187,7 +221,11 @@ def discover(installs: Iterable, procs: list[ProcInfo],
         if not is_terminal_process(p):
             continue
         iid, how = None, ""
-        if p.env_prefix:
+        if by_exe:
+            iid = by_exe.get(exe_key(p.exe)) or next(
+                (by_exe[exe_key(a)] for a in p.cmdline[:1] if exe_key(a) in by_exe), None)
+            how = "exe" if iid else ""
+        if iid is None and p.env_prefix:
             iid, how = by_prefix.get(_norm(p.env_prefix)), "env"
         if iid is None:
             for arg in p.cmdline[:3]:
@@ -242,7 +280,9 @@ class HostOps:
                 except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
                     exe = ""
                 env_prefix = None
-                if lname == "wineserver" or lname == "terminal64.exe" or "terminal64.exe" in " ".join(cmd[:3]).lower():
+                if is_windows():
+                    pass  # no Wine prefixes on Windows: terminals are mapped by exe path
+                elif lname == "wineserver" or lname == "terminal64.exe" or "terminal64.exe" in " ".join(cmd[:3]).lower():
                     try:
                         env_prefix = p.environ().get("WINEPREFIX") or None
                     except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
@@ -255,6 +295,8 @@ class HostOps:
 
     def prefix_of_pid(self, pid: int) -> Optional[str]:
         """The Wine prefix whose files ``pid`` holds open (``lsof -p``), cached per process."""
+        if is_windows():
+            return None
         try:
             ct = psutil.Process(pid).create_time()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -290,6 +332,14 @@ class HostOps:
             return False
 
     def terminate(self, pid: int) -> None:
+        if is_windows():
+            # psutil's terminate() is TerminateProcess (a hard kill) on Windows; ask the window to
+            # close first, the way SIGTERM asks on macOS.  kill() is the hard path.
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True, timeout=15)
+                return
+            except (OSError, subprocess.SubprocessError):
+                pass
         try:
             psutil.Process(pid).terminate()
         except psutil.NoSuchProcess:
@@ -318,9 +368,29 @@ class HostOps:
         if res.returncode != 0:
             raise RuntimeError(f"open -a failed ({res.returncode}): {res.stderr.strip()[:300]}")
 
-    def spawn(self, argv: list[str], env: dict) -> int:
+    def spawn(self, argv: list[str], env: dict, cwd: Optional[str] = None) -> int:
+        """Start a detached process that outlives the supervisor (a supervisor restart or
+        self-update must never take a terminal down with it)."""
+        if is_windows():
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, and break away from the Scheduled Task's
+            # job object when the job allows it (otherwise stopping the task would kill MT5 too).
+            base = 0x00000008 | 0x00000200
+            for flags in (base | 0x01000000, base):
+                try:
+                    proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                            stdin=subprocess.DEVNULL, close_fds=True, env=env, cwd=cwd,
+                                            creationflags=flags)
+                    return proc.pid
+                except PermissionError:
+                    continue  # the job forbids breakaway: start inside it
+                except OSError as ex:
+                    if getattr(ex, "winerror", None) == 5 and flags != base:
+                        continue
+                    raise
+            raise RuntimeError("could not start the terminal")
         proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL, close_fds=True, start_new_session=True, env=env)
+                                stdin=subprocess.DEVNULL, close_fds=True, start_new_session=True, env=env,
+                                cwd=cwd)
         return proc.pid
 
     def sleep(self, sec: float) -> None:
