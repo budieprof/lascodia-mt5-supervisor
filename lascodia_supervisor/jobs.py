@@ -1,6 +1,7 @@
 """Engine job channel (contract C4): execute one job, return ``(status, message, data)``.
 
-Job types: StartTerminal, StopTerminal, RestartTerminal, DeployEaBinary, TailLog, PruneFiles.
+Job types: StartTerminal, StopTerminal, RestartTerminal, DeployEaBinary, TailLog, PruneFiles — and the engine-host
+operations HostOpsStatus, HostBackupNow, HostRestoreDrill, HostDeployApi (hostops.py, off unless ops.enabled).
 The poll/report loop lives in main.py; everything here is synchronous and testable with fakes.
 """
 from __future__ import annotations
@@ -13,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import host, prune
+from . import host, hostops, prune
 
 logger = logging.getLogger("lascodia.supervisor.jobs")
 
@@ -162,8 +163,10 @@ def deploy_ea_binary(install, payload: bytes, expected_sha: str) -> tuple[bool, 
 
 class JobRunner:
     def __init__(self, get_installs: Callable[[], list], controller, pm, watchdog, engine,
-                 supervisor_log: Callable[[], Optional[Path]]) -> None:
+                 supervisor_log: Callable[[], Optional[Path]],
+                 ops: Optional[Callable[[], "hostops.OpsSettings"]] = None) -> None:
         self._get_installs = get_installs
+        self._ops = ops or (lambda: hostops.OpsSettings(False, ""))
         self.controller = controller
         self.pm = pm
         self.watchdog = watchdog
@@ -180,6 +183,15 @@ class JobRunner:
             params = {}
         install = self._install(job.get("installId"))
         reason = str(params.get("reason") or f"engine job {job.get('jobId')}")[:300]
+        if jtype in hostops.HOST_JOB_TYPES:
+            job_id = job.get("jobId")
+            post = getattr(self.engine, "post_job_progress", None)
+            send = (lambda text: post(job_id, text)) if post else None
+            try:
+                return hostops.execute(job, self._ops(), send)
+            except Exception as ex:  # a job must always get a result
+                logger.exception("host job %s (%s) crashed", job_id, jtype)
+                return FAILED, f"supervisor error: {type(ex).__name__}: {ex}"[:500], {}
         try:
             if jtype in ("StartTerminal", "StopTerminal", "RestartTerminal", "DeployEaBinary", "PruneFiles") \
                     and install is None:
