@@ -47,6 +47,23 @@ so it uses the engine's own public address. The engine stores the package as rel
 `macos-pkg`. After changing `bootstrap/install.sh` or anything in `bootstrap/macos-pkg/`, bump
 `bootstrap/macos-pkg/VERSION` and publish again.
 
+**Double-click instead (Windows).** On Windows the console offers **Download the installer** too: a
+small `.exe` saved as `Lascodia Setup <install code>.exe`. Opening it runs the same `install.ps1`
+for the person signed in to Windows. No administrator rights are needed. It reads the code from its
+file name and asks for it if the file was renamed. A copy of everything it printed goes to
+`%LOCALAPPDATA%\Lascodia\Supervisor Install.log`. The `.exe` is not signed with a code-signing
+certificate, so:
+- the browser may hold the download ("not commonly downloaded"): **Keep → Keep anyway**;
+- SmartScreen stops the first open ("Windows protected your PC"): **More info → Run anyway**.
+
+IT departments can run it with no window: `"Lascodia Setup <code>.exe" /S`. Exit code 0 means the
+computer connected; 1 means it was not installed (the log says why).
+
+Build it with `make installer-windows API_BASE=<api base>` (needs `makensis`: `brew install makensis`
+or `apt install nsis`), or build and upload it with `make publish-installer-windows`. The engine
+stores it as release platform `windows-exe`. After changing `bootstrap/install.ps1` or anything in
+`bootstrap/windows-exe/`, bump `bootstrap/windows-exe/VERSION` and publish again.
+
 The `lsc_enr_…` code in the line is a single-use Daemon enrollment code, bound to your
 organisation. It downloads the supervisor and enrolls this computer once. After that, the computer
 signs in with its own machine credential.

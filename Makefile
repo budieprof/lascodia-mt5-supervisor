@@ -1,4 +1,4 @@
-.PHONY: installer publish-installer publish-installer-dry test bundle bundle-macos-arm64 bundle-macos-x86_64 bundle-windows-x64 publish-bundle publish-bundle-dry e2e
+.PHONY: installer publish-installer publish-installer-dry installer-windows publish-installer-windows publish-installer-windows-dry test bundle bundle-macos-arm64 bundle-macos-x86_64 bundle-windows-x64 publish-bundle publish-bundle-dry e2e
 
 PYTHON ?= python3
 
@@ -34,3 +34,14 @@ publish-installer:
 
 publish-installer-dry:
 	DRY_RUN=1 tools/publish_pkg.sh
+
+# Double-click Windows installer (.exe, NSIS: brew install makensis) -> dist/installers/.
+installer-windows:
+	tools/build_exe.sh --api-base "$(API_BASE)"
+
+# Build it from the install.ps1 the engine serves and upload it (LASCODIA_ADMIN_TOKEN).
+publish-installer-windows:
+	tools/publish_exe.sh
+
+publish-installer-windows-dry:
+	DRY_RUN=1 tools/publish_exe.sh
