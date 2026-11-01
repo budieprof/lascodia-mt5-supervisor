@@ -116,6 +116,13 @@ lascodia_install() {
     say "  Downloading..."
     CODE=$(curl -sS -L --retry 3 --retry-delay 2 --connect-timeout 20 -o "$ARCHIVE" -D "$TMP/response.txt" \
            -w '%{http_code}' -H @"$TMP/headers.txt" "$API_BASE/onboarding/supervisor/bundle?platform=$PLATFORM" 2>"$TMP/curl.err") || CODE=000
+    if [ "$CODE" = "000" ]; then
+      # This Mac may map the engine's name to a local address (an /etc/hosts pin or office DNS) whose
+      # certificate it does not trust, or that it cannot reach. Ask public DNS instead (needs curl >= 7.62).
+      CODE=$(curl -sS -L --retry 2 --retry-delay 2 --connect-timeout 20 --doh-url https://1.1.1.1/dns-query \
+             -o "$ARCHIVE" -D "$TMP/response.txt" -w '%{http_code}' -H @"$TMP/headers.txt" \
+             "$API_BASE/onboarding/supervisor/bundle?platform=$PLATFORM" 2>>"$TMP/curl.err") || CODE=000
+    fi
     rm -f "$TMP/headers.txt"
     case "$CODE" in
       200) ;;
