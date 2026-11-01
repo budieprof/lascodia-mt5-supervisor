@@ -33,6 +33,20 @@ flags, no config files.
    terminal (adding the engine address to MetaTrader's WebRequest list; MetaTrader offers no
    supported way to set it from outside).
 
+**Double-click instead (macOS).** On a Mac the console also offers **Download the installer**: a
+small `.pkg` saved as `Lascodia Setup <install code>.pkg`. Opening it runs the same `install.sh`
+for the person signed in. Its postinstall reads the code from the file name; if the file was
+renamed, a dialog asks for the code instead. The package is not signed with an Apple Developer ID,
+so macOS blocks the first open. To allow it:
+- macOS 15 and later: **System Settings → Privacy & Security → Open Anyway**.
+- macOS 14 and earlier: Control-click the file, then **Open**.
+
+Build it with `make installer API_BASE=<api base>`, or build and upload it with
+`make publish-installer`. The upload builds the package from the `install.sh` the engine serves,
+so it uses the engine's own public address. The engine stores the package as release platform
+`macos-pkg`. After changing `bootstrap/install.sh` or anything in `bootstrap/macos-pkg/`, bump
+`bootstrap/macos-pkg/VERSION` and publish again.
+
 The `lsc_enr_…` code in the line is a single-use Daemon enrollment code, bound to your
 organisation. It downloads the supervisor and enrolls this computer once. After that, the computer
 signs in with its own machine credential.

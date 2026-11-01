@@ -1,4 +1,4 @@
-.PHONY: test bundle bundle-macos-arm64 bundle-macos-x86_64 bundle-windows-x64 publish-bundle publish-bundle-dry e2e
+.PHONY: installer publish-installer publish-installer-dry test bundle bundle-macos-arm64 bundle-macos-x86_64 bundle-windows-x64 publish-bundle publish-bundle-dry e2e
 
 PYTHON ?= python3
 
@@ -23,3 +23,14 @@ publish-bundle:
 
 publish-bundle-dry:
 	DRY_RUN=1 tools/publish_bundle.sh
+
+# Double-click macOS installer (.pkg) -> dist/installers/ (API_BASE = the engine's public API base).
+installer:
+	tools/build_pkg.sh --api-base "$(API_BASE)"
+
+# Build it from the installer script the engine serves and upload it (LASCODIA_ADMIN_TOKEN).
+publish-installer:
+	tools/publish_pkg.sh
+
+publish-installer-dry:
+	DRY_RUN=1 tools/publish_pkg.sh

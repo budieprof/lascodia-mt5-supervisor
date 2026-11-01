@@ -1,0 +1,93 @@
+#!/bin/sh
+# Lascodia supervisor - double-click installer for macOS (the postinstall of a payload-free package).
+#
+# The console saves the package as "Lascodia Setup <install code>.pkg", so the install code is read
+# from the name of the package the person opened ($1 / $PACKAGE_PATH).  If the name was changed, the
+# person is asked to paste the code (or the whole install line).  The work itself is the one-line
+# installer, install.sh, shipped next to this script, run as the person signed in at the screen:
+# exactly what pasting the line in Terminal does, so both paths install the same thing.
+#
+# Installer runs this as root.  Run as a normal user (tests), it installs for that user directly.
+# Test hooks: LASCODIA_PKG_CODE (skip the name/dialog), LASCODIA_PKG_NO_DIALOG=1 (never show a
+# dialog), LASCODIA_PKG_LOG (where the install output is copied).  Everything install.sh accepts
+# passes through when not root.
+
+PKG_PATH="${1:-${PACKAGE_PATH:-}}"
+HERE=$(cd "$(dirname "$0")" && pwd)
+CODE_RE='lsc_enr_[a-z0-9]{8}_[A-Za-z0-9]{40}'
+TITLE="Lascodia Supervisor"
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+say() { printf '%s\n' "$*"; }
+
+# ---- who to install for ----------------------------------------------------------------------
+if [ "$(id -u)" = 0 ]; then
+  USER_NAME=$(stat -f%Su /dev/console 2>/dev/null)
+  case "$USER_NAME" in
+    ""|root|loginwindow|_mbsetupuser)
+      say "Install failed: nobody is signed in at this Mac's screen."
+      exit 1 ;;
+  esac
+  USER_ID=$(id -u "$USER_NAME")
+  USER_HOME=$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+  [ -n "$USER_HOME" ] || USER_HOME="/Users/$USER_NAME"
+  # In the person's own login session (so launchctl and dialogs work), as that person.
+  as_user() { launchctl asuser "$USER_ID" sudo -u "$USER_NAME" -H env HOME="$USER_HOME" PATH="$PATH" "$@"; }
+else
+  USER_NAME=$(id -un)
+  USER_HOME="$HOME"
+  as_user() { "$@"; }
+fi
+
+dialogs_ok() { [ "${LASCODIA_PKG_NO_DIALOG:-0}" != 1 ]; }
+
+# A stop sign with the reason; text goes in as arguments, never into the AppleScript source.
+alert() {
+  dialogs_ok || return 0
+  as_user /usr/bin/osascript -e 'on run argv' \
+    -e 'display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"OK"} default button "OK"' \
+    -e 'end run' "$1" "$2" >/dev/null 2>&1 || true
+}
+
+# ---- the install code ------------------------------------------------------------------------
+CODE="${LASCODIA_PKG_CODE:-}"
+[ -n "$CODE" ] || CODE=$(basename "$PKG_PATH" 2>/dev/null | grep -oE "$CODE_RE" | head -n 1)
+if [ -z "$CODE" ] && dialogs_ok; then
+  PASTED=$(as_user /usr/bin/osascript -e 'on run argv' \
+    -e 'text returned of (display dialog (item 1 of argv) default answer "" with title (item 2 of argv) buttons {"Cancel", "Install"} default button "Install")' \
+    -e 'end run' \
+    "This installer did not come with its install code (its file name was changed). In the console, open Terminals, click Add a computer, and copy the install line. Paste it here:" \
+    "$TITLE" 2>/dev/null)
+  CODE=$(printf '%s' "$PASTED" | grep -oE "$CODE_RE" | head -n 1)
+fi
+if [ -z "$CODE" ]; then
+  say "Install failed: no install code."
+  alert "The supervisor was not installed" \
+    "This installer needs the install code from the console. In the console, open Terminals, click Add a computer, and download the installer again (do not rename the file)."
+  exit 1
+fi
+
+# ---- run the one-line installer as that person -----------------------------------------------
+OUT=$(mktemp "${TMPDIR:-/tmp}/lascodia-pkg.XXXXXX") || exit 1
+chmod 644 "$OUT"
+say "Installing the Lascodia supervisor for $USER_NAME..."
+as_user /bin/sh "$HERE/install.sh" "$CODE" >"$OUT" 2>&1 </dev/null
+RC=$?
+cat "$OUT"
+
+# Keep a copy where the person (or support) can find it: ~/Library/Logs/Lascodia Supervisor Install.log
+LOG="${LASCODIA_PKG_LOG:-$USER_HOME/Library/Logs/Lascodia Supervisor Install.log}"
+as_user /bin/mkdir -p "$(dirname "$LOG")" 2>/dev/null
+as_user /bin/sh -c 'cat > "$1"' sh "$LOG" <"$OUT" 2>/dev/null || true
+
+if [ $RC -ne 0 ]; then
+  WHY=$(grep -A1 '^Install failed:' "$OUT" | head -n 2 | sed 's/^Install failed: //')
+  [ -n "$WHY" ] || WHY=$(tail -n 3 "$OUT")
+  rm -f "$OUT"
+  alert "The supervisor was not installed" "$WHY
+
+The full output is in Library/Logs/Lascodia Supervisor Install.log in your home folder."
+  exit 1
+fi
+rm -f "$OUT"
+exit 0

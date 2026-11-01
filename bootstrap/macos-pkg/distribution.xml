@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lascodia supervisor double-click installer. tools/build_pkg.sh fills in __PKG_VERSION__. -->
+<installer-gui-script minSpecVersion="2">
+  <title>Lascodia Supervisor</title>
+  <welcome file="welcome.html" mime-type="text/html"/>
+  <conclusion file="conclusion.html" mime-type="text/html"/>
+  <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
+  <domains enable_localSystem="true"/>
+  <volume-check>
+    <allowed-os-versions><os-version min="11.0"/></allowed-os-versions>
+  </volume-check>
+  <choices-outline>
+    <line choice="default"><line choice="com.lascodia.supervisor.setup"/></line>
+  </choices-outline>
+  <choice id="default"/>
+  <choice id="com.lascodia.supervisor.setup" visible="false">
+    <pkg-ref id="com.lascodia.supervisor.setup"/>
+  </choice>
+  <pkg-ref id="com.lascodia.supervisor.setup" version="__PKG_VERSION__" onConclusion="none">setup.pkg</pkg-ref>
+</installer-gui-script>
