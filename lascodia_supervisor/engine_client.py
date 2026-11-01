@@ -427,6 +427,17 @@ class EngineClient:
             return True
         return 200 <= resp.status_code < 300
 
+    def post_job_progress(self, job_id, lines: str) -> bool:
+        """Stream output of a long host job (gaps program, zero-downtime). Best effort: False = keep the lines and
+        send them with the next batch (a blue/green swap makes the engine unreachable for a few seconds)."""
+        resp = self._request_with_auth(
+            "POST", f"admin/terminals/daemons/jobs/{job_id}/progress", json={"lines": lines[-16 * 1024:]})
+        if resp is None:
+            return False
+        if resp.status_code in (404, 409, 410):
+            return True   # the job finished / an older engine without progress: nothing to retry
+        return 200 <= resp.status_code < 300
+
     def download_release(self, release_id) -> tuple[Optional[bytes], str]:
         """``GET platform/ea/releases/{id}/binary`` with the daemon token → (bytes, "") or (None, why).
         Accepts a raw octet stream or a JSON envelope carrying the binary as base64."""

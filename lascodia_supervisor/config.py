@@ -81,6 +81,25 @@ class MT5Install(BaseModel):
     wedge_after_sec: int = Field(default=300, ge=60, le=3600)
 
 
+class OpsConfig(BaseModel):
+    """Engine-host operations (gaps program, zero-downtime): the console's Operations → Platform host jobs —
+    status, back up now, restore drill, blue/green deploy.  Only the supervisor on the ENGINE host enables this
+    (and the engine sends host jobs only to the daemon named in its EngineConfig Ops:HostDaemonId)."""
+    enabled: bool = False
+    # The live engine checkout (docker-compose.yml, scripts/redeploy-api-bluegreen.sh, scripts/backup/).
+    engine_repo: Optional[str] = None
+    # Blue/green deploys from the console run only when this is ALSO true (defence in depth beside the engine's
+    # Ops:ConsoleDeploy:Enabled, default false).
+    allow_deploy: bool = False
+    backup_dir: Optional[str] = None            # default ~/LascodiaBackups
+    bluegreen_state_dir: Optional[str] = None   # default ~/.lascodia/bluegreen (the swap script's STATE_DIR)
+    caddyfile: str = "/opt/homebrew/etc/Caddyfile"
+    compose_project: str = "lascodia-trading-engine"
+    docker: str = "docker"
+    deploy_timeout_sec: int = Field(default=2400, ge=60, le=4 * 3600)
+    backup_timeout_sec: int = Field(default=6 * 3600, ge=60, le=24 * 3600)
+
+
 class WatchdogConfig(BaseModel):
     """Local auto-restart limits.  They mirror the engine's EA:AutoHeal limits (C8) so a host
     cut off from the engine still behaves the same way."""
@@ -153,6 +172,8 @@ class SupervisorConfig(BaseModel):
     # Works from behind NAT — the engine never needs to reach this host.
     jobs_enabled: bool = True
     jobs_wait_sec: int = Field(default=20, ge=1, le=60)
+    # Engine-host operations (gaps program, zero-downtime) — off unless this supervisor runs on the engine host.
+    ops: Optional[OpsConfig] = None
     # Where sessions, watchdog history and the engine's desired state are kept across restarts.
     # Default: <config dir>/state.
     state_dir: Optional[str] = None

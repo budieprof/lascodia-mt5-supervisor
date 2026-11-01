@@ -63,6 +63,16 @@ watchdog:
   wake_grace_sec: 300        # ... or after the Mac wakes from sleep
 # Pull job channel (engine queues Start/Stop/Restart/DeployEaBinary/TailLog/PruneFiles).
 jobs_enabled: true
+
+# Engine-host operations (gaps program, zero-downtime) — ONLY on the supervisor that runs on the ENGINE host, and the
+# engine must name this daemon in its EngineConfig Ops:HostDaemonId. Runs the console's Operations → Platform jobs:
+# status, "Back up now", "Run restore drill" and (with allow_deploy) the blue/green deploy, all from the engine checkout.
+# ops:
+#   enabled: true
+#   engine_repo: ~/Developments/Software Projects/personal/Lascodia Trading Engine/lascodia-trading-engine
+#   allow_deploy: false        # true = console deploys may run here (the engine's Ops:ConsoleDeploy:Enabled too)
+#   # backup_dir: ~/LascodiaBackups
+#   # bluegreen_state_dir: ~/.lascodia/bluegreen
 # state_dir: <config dir>/state        (sessions, watchdog history, desired state)
 # log_dir:   <install root>/logs       (rotating supervisor.log, 20 MB x 5)
 

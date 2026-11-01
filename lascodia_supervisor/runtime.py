@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 from . import beacons as beacon_mod
 from . import host
+from . import hostops
 from .desired import DesiredStateStore, extract_desired
 from .jobs import EA_BINARY_NAME, FAILED, JobRunner, Sha256Cache
 from .journal import JournalWatcher
@@ -45,7 +46,8 @@ class Supervisor:
         self.wake = wake or WakeDetector()
         self.sha_cache = Sha256Cache()
         self.jobs = JobRunner(lambda: list(self._get_cfg().installs), self.controller, self.pm, self.watchdog,
-                              engine, supervisor_log)
+                              engine, supervisor_log,
+                              ops=lambda: hostops.OpsSettings.from_config(getattr(self._get_cfg(), "ops", None)))
         self._journals: dict[str, JournalWatcher] = {}
         self._runtime: dict[str, dict] = {}
         self._inflight: dict[str, int] = {}
