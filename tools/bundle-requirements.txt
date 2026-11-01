@@ -1,0 +1,23 @@
+# Runtime dependencies baked into the relocatable bundles (tools/build_bundle.sh).
+# Installed with --no-deps for a foreign platform, so EVERY transitive dependency is listed and
+# pinned here (environment markers would be evaluated for the build host, not the target).
+# Plain uvicorn (h11): the daemon serves a loopback admin API, the [standard] extras are not needed.
+# Versions = what the live laptop supervisor runs (2026-11-01).
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+certifi==2026.5.20
+click==8.4.1
+fastapi==0.136.3
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.17
+psutil==7.2.2
+pydantic==2.13.4
+pydantic_core==2.46.4
+PyYAML==6.0.3
+starlette==1.2.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+uvicorn==0.48.0

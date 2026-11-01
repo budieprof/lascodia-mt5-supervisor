@@ -22,6 +22,11 @@ callback_base_url: "http://127.0.0.1:7770"
 # Engine API root.
 engine_url: "http://localhost:5081/api/v1/lascodia-trading-engine"
 
+# auto (default) = system resolver; switch to public DNS-over-HTTPS for the process lifetime when
+# a private/link-local address fails with no-route / not-permitted (macOS Local Network privacy).
+# system = always the OS resolver.  public = always DNS-over-HTTPS.
+engine_resolver: auto
+
 # Long-lived JWT the operator generated for this daemon.  Same shape
 # the EAs use — get one by hitting POST /auth/token with the Admin
 # role.  Keep it secret.

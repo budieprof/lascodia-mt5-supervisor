@@ -100,7 +100,7 @@ class FakeHost:
         if self.open_starts_terminal and app_path in self.app_layouts:
             self.add_terminal(self.app_layouts[app_path], created=self.clock)
 
-    def spawn(self, argv, env):
+    def spawn(self, argv, env, cwd=None):
         self.calls.append(("SPAWN", tuple(argv), env.get("WINEPREFIX")))
         return self.add("wine64", exe=argv[0], cmd=tuple(argv), env_prefix=env.get("WINEPREFIX"))
 

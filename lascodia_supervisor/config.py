@@ -67,7 +67,9 @@ class MT5Install(BaseModel):
     # wrapper app, which is how the live terminals run (and the only way builds >= 6290 start
     # under the Wine 11 wrapper).  ``wine`` = spawn ``wine64 terminal64.exe`` directly (cloned
     # installs, Linux).  Unset = ``app`` when an app bundle is configured or found, else ``wine``.
-    launch_mode: Optional[Literal["app", "wine"]] = None
+    # ``native`` = Windows: start terminal64.exe directly in the user's session (unset on Windows
+    # means native).
+    launch_mode: Optional[Literal["app", "wine", "native"]] = None
     # The wrapper app bundle, e.g. "/Applications/MetaTrader 5 - exness.app".  Unset = the
     # /Applications/MetaTrader 5*.app whose CFBundleIdentifier names this install's prefix.
     app_path: Optional[str] = None
@@ -116,7 +118,9 @@ class SupervisorConfig(BaseModel):
     # "public" = DNS-over-HTTPS, ignoring /etc/hosts — for a host whose /etc/hosts pins the
     # engine name to a LAN address that macOS Local Network privacy blocks for launchd agents
     # (symptom: every engine call fails with "[Errno 65] No route to host").  See public_dns.py.
-    engine_resolver: Literal["system", "public"] = Field(default="system")
+    # "auto" (default) = the system resolver, switching to "public" for the rest of the process
+    # when a connection to a private / link-local address fails with no-route / not-permitted.
+    engine_resolver: Literal["auto", "system", "public"] = Field(default="auto")
     # OPTIONAL after v0.2.  Pre-v0.2 builds required an operator to mint
     # a JWT manually and paste it here.  v0.2+ daemons bootstrap their
     # own JWT via POST /admin/terminals/daemons/auth using `daemon_api_key`
@@ -179,7 +183,9 @@ def _read_mt5_account_from_common_ini(executable_path: str) -> tuple[str, str]:
          has typically logged in once and the file exists.
     """
     try:
-        install_dir = Path(executable_path).parent
+        install_dir = Path(executable_path)
+        if install_dir.suffix.lower() == ".exe":
+            install_dir = install_dir.parent
         ini = install_dir / "config" / "common.ini"
         if not ini.exists():
             return ("", "")
@@ -252,7 +258,10 @@ def load_config() -> SupervisorConfig:
     for install in cfg.installs:
         if install.broker_name and install.account_login:
             continue
-        server, login = _read_mt5_account_from_common_ini(install.executable)
+        # The data folder holds config/common.ini (next to terminal64.exe, or the Windows
+        # %APPDATA% folder mql5_dir points into).
+        data = Path(os.path.expanduser(install.mql5_dir)).parent if install.mql5_dir else Path(install.executable).parent
+        server, login = _read_mt5_account_from_common_ini(str(data))
         if not install.broker_name and server:
             install.broker_name = server
         if not install.account_login and login:

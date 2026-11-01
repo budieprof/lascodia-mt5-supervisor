@@ -56,7 +56,7 @@ class Supervisor:
     # ── helpers ─────────────────────────────────────────────────────────
     def _journal(self, install) -> JournalWatcher:
         w = self._journals.get(install.install_id)
-        logs = host.terminal_dir(install) / "logs"
+        logs = host.journal_dir(install)
         if w is None or w.logs_dir != logs:
             w = self._journals[install.install_id] = JournalWatcher(logs)
         return w
@@ -66,6 +66,13 @@ class Supervisor:
             if self._inflight.get(install_id, 0) > 0:
                 return True
         return self.controller.busy(install_id)
+
+    def any_busy(self) -> bool:
+        """A job or terminal action is in flight on any install (self-update waits for this)."""
+        with self._inflight_lock:
+            if any(n > 0 for n in self._inflight.values()):
+                return True
+        return any(self.controller.busy(i.install_id) for i in self._get_cfg().installs)
 
     def _run_action(self, install, action: str, reason: str) -> None:
         iid = install.install_id

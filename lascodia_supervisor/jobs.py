@@ -97,7 +97,7 @@ def resolve_log(kind: str, install, instance_id: Optional[str], supervisor_log: 
     if install is None:
         return None, False, "unknown or missing installId"
     if kind == "journal":
-        p = host.terminal_dir(install) / "logs"
+        p = host.journal_dir(install)
         found = _newest(x for x in p.glob("*.log") if re.match(r"^\d{8}\.log$", x.name)) if p.is_dir() else None
         return (found, True, "") if found else (None, True, f"no terminal journal in {p}")
     if kind == "ea":
@@ -222,10 +222,16 @@ class JobRunner:
                     {"path": str(path), "text": text, "kind": kind}
             if jtype == "PruneFiles":
                 dry = params.get("dryRun", True) is not False
-                result = prune.run(host.terminal_dir(install), host.mql5_dir(install), dry_run=dry)
+                paths = params.get("paths")
+                if paths is not None and not (isinstance(paths, list) and all(isinstance(p, str) for p in paths)):
+                    return FAILED, "PruneFiles 'paths' must be a list of absolute file paths", {}
+                result = prune.run(host.data_dir(install), host.mql5_dir(install), dry_run=dry, paths=paths)
                 verb = "would free" if dry else "freed"
                 amount = result["totalBytes"] if dry else result["freedBytes"]
-                return SUCCEEDED, f"{result['fileCount']} file(s), {verb} {amount / 1e6:.1f} MB", result
+                msg = f"{result['fileCount']} file(s), {verb} {amount / 1e6:.1f} MB"
+                if result.get("skippedCount"):
+                    msg += f"; {result['skippedCount']} of the listed file(s) skipped (no longer allowed or gone)"
+                return SUCCEEDED, msg, result
             return FAILED, f"unknown job type '{jtype}'", {}
         except Exception as ex:  # a job must always get a result
             logger.exception("job %s (%s) crashed", job.get("jobId"), jtype)

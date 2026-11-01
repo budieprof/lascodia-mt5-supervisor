@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────
-# Lascodia MT5 Supervisor — macOS installer
+# Lascodia MT5 Supervisor — macOS installer (DEVELOPER path: editable install from this checkout)
+#
+# Organisations use the one-line installer instead (bootstrap/install.sh, served by the engine at
+# onboarding/supervisor/install.sh — see README "Install on a computer (one line)").
 #
 # Bootstraps the daemon on macOS:
 #   * picks Python ≥ 3.11 (prefers Homebrew over /usr/bin/python3)
