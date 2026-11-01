@@ -165,7 +165,7 @@ def windows_data_dirs(appdata: Optional[str]) -> dict[str, Path]:
 
 def _program_files_roots(env: dict) -> list[Path]:
     roots = []
-    for key in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+    for key in ("PROGRAMW6432", "PROGRAMFILES", "PROGRAMFILES(X86)"):
         v = env.get(key)
         if v and Path(v) not in roots:
             roots.append(Path(v))
@@ -197,7 +197,9 @@ def _windows_terminals(roots: Iterable[Path]) -> list[Path]:
 
 
 def detect_windows(env: Optional[dict] = None) -> list[dict]:
-    env = dict(os.environ if env is None else env)
+    # Windows variable names ignore case, but a dict copy of os.environ holds them UPPER-cased
+    # (PROGRAMFILES): look every name up upper-cased.
+    env = {k.upper(): v for k, v in (os.environ if env is None else env).items()}
     data_dirs = windows_data_dirs(env.get("APPDATA"))
     out: list[dict] = []
     used: set[str] = set()

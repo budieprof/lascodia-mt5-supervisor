@@ -2,36 +2,33 @@
 #
 # The .exe (bootstrap/windows-exe/installer.nsi) unpacks this file and the engine's own one-line
 # installer (install.ps1, with the engine address already filled in) into a private temp folder
-# and runs:  powershell -File setup.ps1 -ExeName "<the .exe's file name>" [-Silent]
+# and runs:  powershell -File setup.ps1 -ExeName "<the .exe's file name>"
 #
 # It finds the install code in the .exe's own file name - the console saves the download as
-# "Lascodia Setup <code>.exe" - asks for it when the file was renamed, runs install.ps1 for the
-# person signed in to Windows (no administrator rights needed), keeps a copy of everything it
-# printed in %LOCALAPPDATA%\Lascodia\Supervisor Install.log and exits 0 only when the supervisor
-# connected.  On failure it shows the reason in a message box (not with -Silent) and exits 1.
+# "Lascodia Setup <code>.exe" - or, when the file was renamed, in what the person pasted on the
+# installer's "Install code" page (environment LASCODIA_EXE_TYPED; the code is picked out of a
+# whole pasted install line too).  It runs install.ps1 for the person signed in to Windows (no
+# administrator rights needed), keeps a copy of everything it printed in
+# %LOCALAPPDATA%\Lascodia\Supervisor Install.log and exits 0 only when the supervisor connected.
+# On failure it writes the reason to failure.txt next to itself (the installer window shows it)
+# and exits 1.
 #
-# Test hooks (environment): LASCODIA_EXE_CODE (the code, skips the file name), LASCODIA_EXE_NO_DIALOG=1
-# (never show a dialog), LASCODIA_EXE_LOG (log path), plus every hook install.ps1 reads.
-# ASCII only.
+# It never opens a window of its own: the installer starts it hidden, and Windows would show its
+# first window hidden too (the installer would then wait forever on an invisible dialog).
+#
+# Test hooks (environment): LASCODIA_EXE_CODE (the code, skips the file name), LASCODIA_EXE_LOG
+# (log path), plus every hook install.ps1 reads.  ASCII only.
 param(
-    [string]$ExeName = '',
-    [switch]$Silent
+    [string]$ExeName = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $CodeRe = 'lsc_enr_[a-z0-9]{8}_[A-Za-z0-9]{40}'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$NoDialog = $Silent -or ($env:LASCODIA_EXE_NO_DIALOG -eq '1')
+$Failure = Join-Path $Here 'failure.txt'
+Remove-Item -LiteralPath $Failure -Force -ErrorAction SilentlyContinue
 
 function Say([string]$Text) { [Console]::Out.WriteLine($Text) }
-
-function Show-Box([string]$Text, [string]$Title, [string]$Icon) {
-    if ($NoDialog) { return }
-    try {
-        Add-Type -AssemblyName System.Windows.Forms
-        [void][System.Windows.Forms.MessageBox]::Show($Text, $Title, 'OK', $Icon)
-    } catch { }
-}
 
 $Log = $env:LASCODIA_EXE_LOG
 if (-not $Log) {
@@ -41,42 +38,38 @@ if (-not $Log) {
 }
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Log) | Out-Null
-    Set-Content -LiteralPath $Log -Value ("Lascodia supervisor install " + (Get-Date).ToString('u')) -Encoding UTF8
+    Set-Content -LiteralPath $Log -Value ("Lascodia supervisor install " + (Get-Date).ToUniversalTime().ToString('u')) -Encoding UTF8
 } catch { $Log = '' }
 function Keep([string]$Text) {
     Say $Text
     if ($Log) { try { Add-Content -LiteralPath $Log -Value $Text -Encoding UTF8 } catch { } }
 }
 
+# The reason the installer window shows (one or two short lines, first letter upper-case).
+function Fail-With([string]$Why) {
+    $Why = $Why.Trim()
+    if ($Why) { $Why = $Why.Substring(0, 1).ToUpperInvariant() + $Why.Substring(1) }
+    $text = $Why + "`r`n`r`nThe full output is in %LOCALAPPDATA%\Lascodia\Supervisor Install.log."
+    try { Set-Content -LiteralPath $Failure -Value $text -Encoding Unicode } catch { }
+    exit 1
+}
+
 # ---- the install code -----------------------------------------------------------------------
 $Code = ''
 if ($env:LASCODIA_EXE_CODE) { $Code = $env:LASCODIA_EXE_CODE }
 elseif ($ExeName -cmatch $CodeRe) { $Code = $Matches[0] }
-if (-not $Code -and -not $NoDialog) {
-    # The file was renamed (or saved without the console): the person pastes the code - or the
-    # whole install line, the code is picked out of it.
-    try {
-        Add-Type -AssemblyName Microsoft.VisualBasic
-        $typed = [Microsoft.VisualBasic.Interaction]::InputBox(
-            "This installer's file name does not carry its install code (it starts with lsc_enr_).`r`n`r`n" +
-            "In the console open Terminals, click Add a computer, copy the install line and paste it here.",
-            'Lascodia Supervisor', '')
-        if ($typed -cmatch $CodeRe) { $Code = $Matches[0] }
-    } catch { }
-}
+elseif ([string]$env:LASCODIA_EXE_TYPED -cmatch $CodeRe) { $Code = $Matches[0] }
 if (-not $Code) {
     Keep 'Install failed: no install code.'
     Keep 'Download the installer again from Add a computer in the console and do not rename the file.'
-    Show-Box "No install code, so nothing was installed.`r`n`r`nDownload the installer again from Add a computer in the console and do not rename the file." 'The supervisor was not installed' 'Error'
-    exit 1
+    Fail-With "No install code, so nothing was installed.`r`nDownload the installer again from Add a computer in the console and do not rename the file."
 }
 
 # ---- run the engine's one-line installer ----------------------------------------------------
 $Script = Join-Path $Here 'install.ps1'
 if (-not (Test-Path -LiteralPath $Script)) {
     Keep 'Install failed: this installer is incomplete (install.ps1 is missing).'
-    Show-Box 'This installer is damaged. Download it again from the console.' 'The supervisor was not installed' 'Error'
-    exit 1
+    Fail-With 'This installer is damaged. Download it again from the console.'
 }
 Keep "Installing the Lascodia supervisor for $env:USERNAME..."
 $lines = New-Object System.Collections.Generic.List[string]
@@ -115,6 +108,4 @@ if ($failedAt -ge 0) {
     $why = (($lines | Select-Object -Last 3) -join "`r`n").Trim()
     if (-not $why) { $why = 'The installer stopped without saying why.' }
 }
-$where = 'The full output is in %LOCALAPPDATA%\Lascodia\Supervisor Install.log.'
-Show-Box ($why + "`r`n`r`n" + $where) 'The supervisor was not installed' 'Error'
-exit 1
+Fail-With $why

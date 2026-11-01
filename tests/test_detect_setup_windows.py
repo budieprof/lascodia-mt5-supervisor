@@ -81,6 +81,17 @@ class WindowsDetectTests(unittest.TestCase):
             # no origin.txt → portable layout: data next to the exe
             self.assertEqual(rows["metatrader-5"]["mql5_dir"], str(pf / "MetaTrader 5" / "MQL5"))
 
+    def test_environment_names_in_any_case(self):
+        # On Windows a dict copy of os.environ is UPPER-cased (PROGRAMFILES); 0.4.0 looked up
+        # "ProgramFiles" and found no terminal on any real PC.
+        with tempfile.TemporaryDirectory() as d:
+            pf = Path(d) / "Program Files"
+            (pf / "MetaTrader 5").mkdir(parents=True)
+            (pf / "MetaTrader 5" / "terminal64.exe").write_bytes(b"MZ")
+            for env in ({"PROGRAMFILES": str(pf)}, {"PROGRAMW6432": str(pf)}, {"programfiles": str(pf)}):
+                rows = detect.detect_windows(env)
+                self.assertEqual([r["install_id"] for r in rows], ["metatrader-5"], env)
+
     def test_read_origin_encodings(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "origin.txt"

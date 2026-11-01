@@ -89,10 +89,19 @@ for PLAT in "${PLATFORMS[@]}"; do
   fi
   # Drop what a headless daemon never needs (and pip: the bundle is immutable; updates replace it).
   rm -rf "$STDLIB/test" "$STDLIB/idlelib" "$STDLIB/tkinter" "$STDLIB/turtledemo" "$STDLIB/ensurepip" \
-         "$STDLIB/lib2to3" "$WORK/python/lib/tcl"* "$WORK/python/lib/tk"* "$WORK/python/lib/itcl"* \
-         "$WORK/python/lib/thread"* "$WORK/python/tcl" "$WORK/python/share" \
+         "$STDLIB/lib2to3" "$WORK/python/tcl" "$WORK/python/share" \
          "$SITE"/pip "$SITE"/pip-* "$WORK/python/bin/pip"* "$WORK/python/Scripts/pip"* \
          "$WORK/python/bin/idle"* "$WORK/python/bin/pydoc"* "$WORK/python/bin/2to3"*
+  # Tcl/Tk libraries sit in python/lib/ only in the POSIX layout.  NEVER glob python/lib/* for a
+  # Windows bundle: this Mac's file system ignores case, so python/lib/thread* is python/Lib/threading.py
+  # there (0.4.0 shipped a Windows Python without threading and could not start at all).
+  if [[ "$PLAT" != windows-* ]]; then
+    rm -rf "$WORK/python/lib/tcl"* "$WORK/python/lib/tk"* "$WORK/python/lib/itcl"* "$WORK/python/lib/thread"*
+  fi
+  for m in threading.py logging/__init__.py json/__init__.py ssl.py asyncio/__init__.py concurrent/futures/__init__.py \
+           subprocess.py zipfile/__init__.py tomllib/__init__.py; do
+    [[ -f "$STDLIB/$m" ]] || { echo "$PLAT: the bundled Python lost $m while pruning" >&2; exit 2; }
+  done
   REQS=(-r "$REPO/tools/bundle-requirements.txt")
   [[ "$PLAT" == windows-* ]] && REQS+=(-r "$REPO/tools/bundle-requirements-windows.txt")
   PLAT_ARGS=()
