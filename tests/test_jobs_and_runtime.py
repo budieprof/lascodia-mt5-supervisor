@@ -175,6 +175,54 @@ class PruneTests(unittest.TestCase):
         self.assertFalse(p.exists())
 
 
+    def test_paths_deletes_only_the_reviewed_list(self):
+        a = self.mk("logs/20260901.log", 60, 100)
+        b = self.mk("logs/20260902.log", 59, 200)
+        self.mk("logs/20261031.log", 0)
+        r = prune.run(self.lay.term, self.lay.mql5, dry_run=False, paths=[str(a)])
+        self.assertEqual((r["deletedCount"], r["freedBytes"], r["skippedCount"]), (1, 100, 0))
+        self.assertFalse(a.exists())
+        self.assertTrue(b.exists())           # qualified, but the operator did not list it
+
+    def test_paths_that_no_longer_qualify_are_skipped(self):
+        old = self.mk("logs/20260901.log", 60, 100)
+        newest = self.mk("logs/20261031.log", 0)
+        apikey = self.mk("MQL5/Files/Lascodia/apikey_LASC-OLD-111.txt", 100)
+        touched = self.mk("logs/20260903.log", 60)
+        age(touched, 0)                        # written to since the dry run
+        outside = Path(self.tmp.name) / "elsewhere.log"
+        outside.write_text("x")
+        gone = self.lay.term / "logs" / "20260801.log"
+        listed = [str(old), str(newest), str(apikey), str(touched), str(outside), str(gone), "relative.log",
+                  str(old)]
+        r = prune.run(self.lay.term, self.lay.mql5, dry_run=False, paths=listed)
+        self.assertEqual(r["deletedCount"], 1)
+        self.assertEqual(r["requestedCount"], len(listed))
+        reasons = {s["path"]: s["reason"] for s in r["skipped"]}
+        for keep in (newest, apikey, touched, outside):
+            self.assertTrue(keep.exists(), keep.name)
+            self.assertIn("no longer allowed", reasons[str(keep)])
+        self.assertEqual(reasons[str(gone)], "already gone")
+        self.assertEqual(reasons["relative.log"], "not an absolute path")
+        self.assertFalse(old.exists())
+
+    def test_paths_dry_run_and_job_validation(self):
+        old = self.mk("logs/20260901.log", 60, 100)
+        self.mk("logs/20261031.log", 0)
+        r = prune.run(self.lay.term, self.lay.mql5, dry_run=True, paths=[str(old)])
+        self.assertEqual((r["fileCount"], r["deletedCount"]), (1, 0))
+        self.assertTrue(old.exists())
+        from lascodia_supervisor.jobs import JobRunner
+        runner = JobRunner(lambda: [self.lay.install], None, None, None, None, lambda: None)
+        st, msg, _ = runner.execute({"jobId": 1, "type": "PruneFiles", "installId": "exness",
+                                     "params": {"dryRun": False, "paths": "not-a-list"}})
+        self.assertEqual(st, "Failed")
+        st, msg, data = runner.execute({"jobId": 2, "type": "PruneFiles", "installId": "exness",
+                                        "params": {"dryRun": False, "paths": [str(old)]}})
+        self.assertEqual((st, data["deletedCount"]), ("Succeeded", 1))
+        self.assertFalse(old.exists())
+
+
 class JournalTests(unittest.TestCase):
     def test_signatures(self):
         text = ("Ticks\told tick USDCHF (tick: 1971.07.14 00:22:42.000, last: 2026.10.27 19:10:31.215)\n"
