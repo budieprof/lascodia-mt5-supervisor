@@ -266,6 +266,20 @@ class HostMaintenanceLockTests(unittest.TestCase):
         self.hold(-1)
         self.assertTrue(self.c.stop(self.lay.install, "test").ok)
 
+    def test_runtime_reports_the_lock_to_the_engine(self):
+        # 0.4.3 (EA hardening R6b): the engine's auto-heal ladder holds terminal restarts while the lock is held.
+        from lascodia_supervisor import hostlock
+        from lascodia_supervisor.runtime import host_maintenance_payload
+        free = host_maintenance_payload(hostlock.read(str(self.lock)))
+        self.assertEqual(free, {"held": False, "holder": "", "action": "", "since": "", "expiresUtc": ""})
+        self.hold(600, action="engine deploy")
+        held = host_maintenance_payload(hostlock.read(str(self.lock)))
+        self.assertTrue(held["held"])
+        self.assertEqual((held["holder"], held["action"], held["since"]), ("maint:test", "engine deploy", "2026-11-08T14:39:00Z"))
+        self.assertRegex(held["expiresUtc"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.hold(-1)
+        self.assertFalse(host_maintenance_payload(hostlock.read(str(self.lock)))["held"])
+
     def test_no_lock_directory_is_free(self):
         from lascodia_supervisor import hostlock
         self.assertFalse(hostlock.read(str(self.lock)).held)

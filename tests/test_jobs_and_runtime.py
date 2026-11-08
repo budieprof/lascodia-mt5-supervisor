@@ -349,7 +349,7 @@ class RuntimeTests(unittest.TestCase):
         rt = rows[0]["runtime"]
         self.assertEqual(set(rt), {"running", "terminalPid", "wrapperPid", "adopted", "launchMode", "beacons",
                                    "beaconReadError", "watchdog", "journalSignals", "eaBinarySha256",
-                                   "diskFreeBytes"})
+                                   "diskFreeBytes", "hostMaintenance"})
         self.assertEqual((rt["running"], rt["terminalPid"], rt["wrapperPid"], rt["adopted"], rt["launchMode"]),
                          (True, t, w, True, "app"))
         self.assertEqual(rt["beacons"], [beacon])
