@@ -89,6 +89,12 @@ class Supervisor:
                 else:
                     self.pm.note_stopping(iid)
                     res = self.controller.stop(install, reason=f"watchdog: {reason}")
+                if res.data.get("hostMaintenance"):
+                    # Deferred, not failed: the host maintenance lock is held (hostlock.py). Counting it as a
+                    # failed restart would walk the watchdog's back-off / give-up limits for nothing.
+                    logger.info("watchdog %s %s deferred: %s", iid, action, res.message)
+                    self.pm.refresh()
+                    return
                 logger.warning("watchdog %s %s → %s: %s", iid, action, "ok" if res.ok else "FAILED", res.message)
                 self.watchdog.note_action_result(iid, res.ok, res.message)
                 self.pm.refresh()

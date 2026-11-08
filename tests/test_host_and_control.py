@@ -220,3 +220,52 @@ class AdoptionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostMaintenanceLockTests(unittest.TestCase):
+    """2026-11-08: a macOS update rebooted mac2 mid blue/green swap — disruptive work now takes one host lock
+    (engine deploy/prod-host/host-lock.sh). The supervisor must not stop/restart terminals while it is held."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.lay = make_layout(root, "exness")
+        self.h = FakeHost()
+        self.h.app_layouts[self.lay.app] = self.lay
+        self.lock = root / "host-maintenance.lock"
+        self.c = TerminalController(self.h, lambda: [self.lay.install], apps_dir=self.lay.apps,
+                                    host_lock_dir=str(self.lock))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def hold(self, expires_in: int, holder: str = "maint:test", action: str = "reboot"):
+        import time as _t
+        self.lock.mkdir(exist_ok=True)
+        (self.lock / "holder").write_text(holder)
+        (self.lock / "action").write_text(action)
+        (self.lock / "since").write_text("2026-11-08T14:39:00Z")
+        (self.lock / "expires").write_text(str(int(_t.time()) + expires_in))
+
+    def test_stop_and_restart_refused_while_held_and_nothing_signalled(self):
+        self.h.add_terminal(self.lay)
+        self.hold(600)
+        for res in (self.c.stop(self.lay.install, "auto-heal"), self.c.restart(self.lay.install, "auto-heal")):
+            self.assertFalse(res.ok)
+            self.assertTrue(res.data.get("hostMaintenance"))
+            self.assertIn("maint:test", res.message)
+        self.assertEqual([c for c in self.h.calls if c[0] in ("TERM", "KILL")], [])
+
+    def test_start_still_allowed_while_held(self):
+        self.hold(600)
+        res = self.c.start(self.lay.install, "post-reboot", wait=False)
+        self.assertTrue(res.ok, res.message)
+
+    def test_expired_lock_is_free(self):
+        self.h.add_terminal(self.lay)
+        self.hold(-1)
+        self.assertTrue(self.c.stop(self.lay.install, "test").ok)
+
+    def test_no_lock_directory_is_free(self):
+        from lascodia_supervisor import hostlock
+        self.assertFalse(hostlock.read(str(self.lock)).held)

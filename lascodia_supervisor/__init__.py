@@ -13,4 +13,4 @@ once the terminal boots).  Its job is exactly "start / stop / report on
 MT5 processes."
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"

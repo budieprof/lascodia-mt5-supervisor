@@ -18,7 +18,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import host
+from . import host, hostlock
 from .wine import build_wine_command, build_wine_env
 
 logger = logging.getLogger("lascodia.supervisor.control")
@@ -35,13 +35,15 @@ class TerminalController:
     def __init__(self, ops: host.HostOps, get_installs: Callable[[], list],
                  stop_grace_sec: float = 20.0, start_timeout_sec: float = 90.0,
                  apps_dir: str = host.APPLICATIONS_DIR,
-                 before_launch: Optional[Callable[[object], None]] = None) -> None:
+                 before_launch: Optional[Callable[[object], None]] = None,
+                 host_lock_dir: Optional[str] = None) -> None:
         self.ops = ops
         self._get_installs = get_installs
         self.stop_grace_sec = stop_grace_sec
         self.start_timeout_sec = start_timeout_sec
         self.apps_dir = apps_dir
         self.before_launch = before_launch
+        self.host_lock_dir = host_lock_dir
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -73,8 +75,20 @@ class TerminalController:
             return f"{what} {pid} killed"
         return f"{what} {pid} STILL RUNNING after SIGKILL"
 
+    def maintenance_block(self, install, verb: str) -> Optional[ActionResult]:
+        """A refusal while the host maintenance lock is held by someone (hostlock.py), else None."""
+        st = hostlock.read(self.host_lock_dir)
+        if not st.held:
+            return None
+        logger.warning("install %s: not %s the terminal — host maintenance lock %s", install.install_id, verb, st.describe())
+        return ActionResult(False, f"host maintenance in progress ({st.describe()}) — not {verb} the terminal; retry later",
+                            {"hostMaintenance": True, "holder": st.holder, "action": st.action, "expires": st.expires})
+
     # ── stop ────────────────────────────────────────────────────────────
     def stop(self, install, reason: str = "") -> ActionResult:
+        blocked = self.maintenance_block(install, "stopping")
+        if blocked is not None:
+            return blocked
         with self.lock_for(install.install_id):
             return self._stop_locked(install, reason)
 
@@ -155,6 +169,9 @@ class TerminalController:
 
     # ── restart ─────────────────────────────────────────────────────────
     def restart(self, install, reason: str = "") -> ActionResult:
+        blocked = self.maintenance_block(install, "restarting")
+        if blocked is not None:
+            return blocked
         with self.lock_for(install.install_id):
             stopped = self._stop_locked(install, reason)
             if not stopped.ok:
