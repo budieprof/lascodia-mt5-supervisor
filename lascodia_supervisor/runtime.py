@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 from . import beacons as beacon_mod
 from . import host
+from . import hostlock
 from . import hostops
 from .desired import DesiredStateStore, extract_desired
 from .jobs import EA_BINARY_NAME, FAILED, JobRunner, Sha256Cache
@@ -26,6 +27,14 @@ from .wake import WakeDetector
 from .watchdog import Limits, Observation, Watchdog
 
 logger = logging.getLogger("lascodia.supervisor.runtime")
+
+
+def host_maintenance_payload(st: "hostlock.HostLockState") -> dict:
+    """The C4 ``runtime.hostMaintenance`` object: ``held`` plus who holds the lock, for what, and until when (UTC)."""
+    if not st.held:
+        return {"held": False, "holder": "", "action": "", "since": "", "expiresUtc": ""}
+    return {"held": True, "holder": st.holder, "action": st.action, "since": st.since,
+            "expiresUtc": beacon_mod.iso_utc(float(st.expires)) if st.expires else ""}
 
 
 class Supervisor:
@@ -157,6 +166,10 @@ class Supervisor:
             "journalSignals": {k: bool(signals.get(k)) for k in ("oldTick", "invalidBook", "debuggerFound")},
             "eaBinarySha256": self.sha_cache.get(host.mql5_dir(install) / "Experts" / EA_BINARY_NAME),
             "diskFreeBytes": int(free),
+            # 0.4.3 (EA hardening R6b): the host maintenance lock, so the engine's auto-heal ladder HOLDS a terminal restart
+            # while it is held instead of queueing a RestartTerminal job this supervisor would refuse (and that would still
+            # count against the ladder's restart caps).
+            "hostMaintenance": host_maintenance_payload(hostlock.read(self.controller.host_lock_dir)),
         }
 
     # ── engine I/O ─────────────────────────────────────────────────────
